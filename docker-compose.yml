@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: abonstock-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-abonstock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-abonstock_dev_pass_2026}
+      POSTGRES_DB: ${POSTGRES_DB:-abonstock_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - abonstock_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-abonstock} -d ${POSTGRES_DB:-abonstock_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  abonstock_pgdata:

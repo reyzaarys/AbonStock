@@ -1,0 +1,40 @@
+## .NET Core / C#
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Visual Studio & VS Code
+.vs/
+.vscode/
+*.swp
+*~
+
+## Rider
+.idea/
+*.sln.iml
+
+## Environment & Secrets
+.env
+*.local.json
+secrets.json
+
+## Test Results & Coverage
+[Tt]est[Rr]esult*/
+*.coverage
+*.coveragexml
+coverage.cobertura.xml
+
+## Logs
+*.log
+
+## Docker
+.docker/
+
+## OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store

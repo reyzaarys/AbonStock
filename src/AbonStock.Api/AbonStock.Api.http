@@ -1,0 +1,31 @@
+@AbonStock.Api_HostAddress = http://localhost:5299
+
+### Get OpenAPI Swagger Specification
+GET {{AbonStock.Api_HostAddress}}/swagger/v1/swagger.json
+Accept: application/json
+
+###
+
+### List Products
+GET {{AbonStock.Api_HostAddress}}/api/products
+Accept: application/json
+
+###
+
+### List Orders
+GET {{AbonStock.Api_HostAddress}}/api/orders
+Accept: application/json
+
+###
+
+### Get Order by ID (Demo Order 3 - Pending)
+GET {{AbonStock.Api_HostAddress}}/api/orders/3
+Accept: application/json
+
+###
+
+### List Stock Movements Audit Ledger
+GET {{AbonStock.Api_HostAddress}}/api/inventory/movements
+Accept: application/json
+
+###
