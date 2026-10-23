@@ -265,8 +265,8 @@ public static class AbonStockDataSeeder
             var orderCompleted = new Order
             {
                 OrderNumber = OrderNoCompleted,
-                CustomerName = "Hendra Wijaya (Toko Berkah)",
-                CustomerEmail = "hendra@tokoberkah.com",
+                CustomerName = "Toko Retail Demo A",
+                CustomerEmail = "retail-a@example.com",
                 Status = OrderStatus.Completed,
                 TotalAmount = 50 * 35000.00m,
                 CreatedAtUtc = now.AddDays(-36),
@@ -320,8 +320,8 @@ public static class AbonStockDataSeeder
             var orderConfirmed = new Order
             {
                 OrderNumber = OrderNoConfirmed,
-                CustomerName = "Dewi Lestari (Resto Nusantara)",
-                CustomerEmail = "dewi@restonusantara.id",
+                CustomerName = "Restoran Demo B",
+                CustomerEmail = "resto-b@example.com",
                 Status = OrderStatus.Confirmed,
                 TotalAmount = (20 * 35000.00m) + (15 * 37500.00m),
                 CreatedAtUtc = now.AddDays(-3),
@@ -383,8 +383,8 @@ public static class AbonStockDataSeeder
             var orderPending = new Order
             {
                 OrderNumber = OrderNoPending,
-                CustomerName = "Siti Rahayu (Catering Berkah)",
-                CustomerEmail = "siti@cateringberkah.com",
+                CustomerName = "Katering Demo C",
+                CustomerEmail = "catering-c@example.com",
                 Status = OrderStatus.Pending,
                 TotalAmount = (10 * 35000.00m) + (10 * 28000.00m),
                 CreatedAtUtc = now.AddDays(-1),
@@ -422,8 +422,8 @@ public static class AbonStockDataSeeder
             var orderCancelled = new Order
             {
                 OrderNumber = OrderNoCancelled,
-                CustomerName = "Bambang Pratama",
-                CustomerEmail = "bambang@pratama.net",
+                CustomerName = "Distributor Demo D",
+                CustomerEmail = "distributor-d@example.com",
                 Status = OrderStatus.Cancelled,
                 TotalAmount = 5 * 28000.00m,
                 CreatedAtUtc = now.AddDays(-4),

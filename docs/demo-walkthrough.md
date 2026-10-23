@@ -51,10 +51,10 @@ Upon initial launch in Development mode, the database contains:
 ### Pre-Seeded Orders & Statuses
 | ID | Order Number | Customer | Status | Details |
 | :---: | :--- | :--- | :---: | :--- |
-| **1** | `ORD-20260915-DEMO-001` | Hendra Wijaya (Toko Berkah) | `Completed` | Historical fulfillment of Batch 1. |
-| **2** | `ORD-20261018-DEMO-002` | Dewi Lestari (Resto Nusantara) | `Completed`* | Fulfilled during development verification. |
-| **3** | `ORD-20261019-DEMO-003` | Siti Rahayu (Catering Berkah) | `Pending` | **Primary order for testing the full lifecycle!** |
-| **4** | `ORD-20261017-DEMO-004` | Bambang Pratama | `Cancelled` | Audit trail of cancelled order with released reservation. |
+| **1** | `ORD-20260915-DEMO-001` | Toko Retail Demo A | `Completed` | Historical fulfillment of Batch 1. |
+| **2** | `ORD-20261018-DEMO-002` | Restoran Demo B | `Completed`* | Fulfilled during development verification. |
+| **3** | `ORD-20261019-DEMO-003` | Katering Demo C | `Pending` | **Primary order for testing the full lifecycle!** |
+| **4** | `ORD-20261017-DEMO-004` | Distributor Demo D | `Cancelled` | Audit trail of cancelled order with released reservation. |
 
 *\* Note: Once an order reaches `Completed`, it cannot be re-fulfilled. Use Order 3 (or create a new order) to test confirmation and fulfillment.*
 
@@ -72,7 +72,7 @@ In this scenario, you will take Order 3 (`ORD-20261019-DEMO-003`) through confir
 {
   "id": 3,
   "orderNumber": "ORD-20261019-DEMO-003",
-  "customerName": "Siti Rahayu (Catering Berkah)",
+  "customerName": "Katering Demo C",
   "status": "Pending",
   "totalAmount": 630000.00,
   "completedAtUtc": null,

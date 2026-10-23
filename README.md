@@ -90,13 +90,14 @@ Artisanal food manufacturing (such as shredded beef and chicken—*Abon*) requir
 ## 4. Architecture & Directory Structure
 
 ```
-Upwork/
+AbonStock/
 ├── .env.example                     # Environment template for local Docker setup
 ├── .gitignore                       # Standard .NET / Docker ignore rules
 ├── AbonStock.sln                    # Visual Studio solution file
 ├── docker-compose.yml               # PostgreSQL 16 local container definition
 ├── docs/
 │   ├── architecture.md              # In-depth architectural & concurrency design
+│   ├── demo-evidence.md             # Verified API demonstration evidence & operational runbook
 │   ├── demo-walkthrough.md          # Step-by-step Swagger UI verification guide
 │   └── upwork-portfolio.md          # Technical summary & portfolio case study
 ├── src/
@@ -144,8 +145,8 @@ Upwork/
 
 ### 1. Clone the Repository
 ```bash
-git clone <repository-url>
-cd Upwork
+git clone https://github.com/reyzaarys/AbonStock.git
+cd AbonStock
 ```
 
 ### 2. Configure Environment Variables
@@ -271,4 +272,5 @@ This repository represents Milestone 1 (M1) focusing on core inventory and fulfi
 For deeper technical deep-dives:
 - [Architecture & Concurrency Guide](docs/architecture.md)
 - [Interactive Swagger Demo Walkthrough](docs/demo-walkthrough.md)
+- [Verified API Demonstration Evidence & Runbook](docs/demo-evidence.md)
 - [Upwork Portfolio Case Study](docs/upwork-portfolio.md)
