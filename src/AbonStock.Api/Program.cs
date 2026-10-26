@@ -13,6 +13,10 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container
 builder.Services.AddControllers();
+builder.Services.Configure<RouteOptions>(options =>
+{
+    options.LowercaseUrls = true;
+});
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
@@ -150,6 +154,50 @@ var app = builder.Build();
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
+    // Normalize OpenAPI version for Swagger UI compatibility (upstream issue swagger-api/swagger-ui#10502)
+    app.Use(async (context, next) =>
+    {
+        if (HttpMethods.IsGet(context.Request.Method) &&
+            context.Request.Path.Value?.EndsWith("/swagger/v1/swagger.json", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            var originalBody = context.Response.Body;
+            await using var memoryStream = new MemoryStream();
+            context.Response.Body = memoryStream;
+
+            try
+            {
+                await next();
+            }
+            finally
+            {
+                context.Response.Body = originalBody;
+            }
+
+            var isJson = context.Response.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true;
+            if (context.Response.StatusCode == StatusCodes.Status200OK && isJson)
+            {
+                memoryStream.Seek(0, SeekOrigin.Begin);
+                using var reader = new StreamReader(memoryStream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+                var json = await reader.ReadToEndAsync(context.RequestAborted);
+
+                if (json.Contains("\"openapi\": \"3.0.4\"", StringComparison.Ordinal))
+                {
+                    var patchedJson = json.Replace("\"openapi\": \"3.0.4\"", "\"openapi\": \"3.0.1\"", StringComparison.Ordinal);
+                    context.Response.ContentLength = Encoding.UTF8.GetByteCount(patchedJson);
+                    await context.Response.WriteAsync(patchedJson, context.RequestAborted);
+                    return;
+                }
+            }
+
+            // Preserve original response body for non-200, non-JSON, or when version string is not present
+            memoryStream.Seek(0, SeekOrigin.Begin);
+            await memoryStream.CopyToAsync(originalBody, context.RequestAborted);
+            return;
+        }
+
+        await next();
+    });
+
     app.UseSwagger();
     app.UseSwaggerUI(c =>
     {
