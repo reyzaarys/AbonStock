@@ -279,10 +279,59 @@ public class InventoryService(AbonStockDbContext dbContext) : IInventoryService
     {
         var batch = await _dbContext.InventoryBatches
             .AsNoTracking()
+            .Include(b => b.Product)
             .FirstOrDefaultAsync(b => b.Id == batchId, ct)
             ?? throw new NotFoundException($"Batch with ID {batchId} was not found.");
 
         return BatchResponse.FromEntity(batch);
+    }
+
+    public async Task<PagedResult<BatchResponse>> GetBatchesAsync(BatchListQuery query, CancellationToken ct = default)
+    {
+        var dbQuery = _dbContext.InventoryBatches
+            .AsNoTracking()
+            .Include(b => b.Product)
+            .AsQueryable();
+
+        if (query.ProductId.HasValue)
+        {
+            dbQuery = dbQuery.Where(b => b.ProductId == query.ProductId.Value);
+        }
+
+        if (query.Status.HasValue)
+        {
+            dbQuery = dbQuery.Where(b => b.Status == query.Status.Value);
+        }
+
+        if (!string.IsNullOrWhiteSpace(query.Search))
+        {
+            var pattern = $"%{query.Search.Trim()}%";
+            dbQuery = dbQuery.Where(b =>
+                EF.Functions.ILike(b.BatchNo, pattern) ||
+                (b.Product != null && (EF.Functions.ILike(b.Product.Name, pattern) || EF.Functions.ILike(b.Product.Sku, pattern))));
+        }
+
+        dbQuery = (query.SortBy?.Trim().ToLowerInvariant(), query.SortDescending) switch
+        {
+            ("expirydate", true) => dbQuery.OrderByDescending(b => b.ExpiryDate).ThenByDescending(b => b.Id),
+            ("expirydate", false) => dbQuery.OrderBy(b => b.ExpiryDate).ThenBy(b => b.Id),
+            ("createdat", true) => dbQuery.OrderByDescending(b => b.CreatedAtUtc).ThenByDescending(b => b.Id),
+            ("createdat", false) => dbQuery.OrderBy(b => b.CreatedAtUtc).ThenBy(b => b.Id),
+            ("batchno", true) => dbQuery.OrderByDescending(b => b.BatchNo).ThenByDescending(b => b.Id),
+            ("batchno", false) => dbQuery.OrderBy(b => b.BatchNo).ThenBy(b => b.Id),
+            ("productiondate", true) => dbQuery.OrderByDescending(b => b.ProductionDate).ThenByDescending(b => b.Id),
+            _ => dbQuery.OrderBy(b => b.ProductionDate).ThenBy(b => b.Id)
+        };
+
+        var totalCount = await dbQuery.CountAsync(ct);
+
+        var items = await dbQuery
+            .Skip((query.Page - 1) * query.PageSize)
+            .Take(query.PageSize)
+            .Select(b => BatchResponse.FromEntity(b))
+            .ToListAsync(ct);
+
+        return new PagedResult<BatchResponse>(items, query.Page, query.PageSize, totalCount);
     }
 
     public async Task<PagedResult<StockMovementResponse>> GetMovementsAsync(StockMovementListQuery query, CancellationToken ct = default)

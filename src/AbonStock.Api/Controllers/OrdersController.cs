@@ -1,10 +1,12 @@
 using AbonStock.Api.Common;
 using AbonStock.Api.Dtos.Orders;
 using AbonStock.Api.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AbonStock.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]

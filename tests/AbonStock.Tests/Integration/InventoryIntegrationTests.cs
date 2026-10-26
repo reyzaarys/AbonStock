@@ -701,4 +701,157 @@ public class InventoryIntegrationTests(PostgresTestFixture fixture) : IClassFixt
         var finalMovementsCount = await db2.StockMovements.CountAsync(m => m.ProductId == product.Id);
         Assert.Equal(initialMovementsCount, finalMovementsCount);
     }
+
+    [Fact]
+    public async Task GetBatches_WithPaginationAndFiltering_ReturnsPagedResultAndProductInfo()
+    {
+        var product = await CreateTestProductAsync("BATCH-LIST");
+
+        var prodDate = DateOnly.FromDateTime(DateTime.UtcNow);
+        var expDate = prodDate.AddMonths(6);
+
+        var receiptReq1 = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-L1-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = prodDate,
+            ExpiryDate = expDate,
+            Quantity = 40
+        };
+        var r1 = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq1);
+        Assert.Equal(HttpStatusCode.Created, r1.StatusCode);
+
+        var receiptReq2 = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-L2-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = prodDate.AddDays(1),
+            ExpiryDate = expDate.AddDays(1),
+            Quantity = 60
+        };
+        var r2 = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq2);
+        Assert.Equal(HttpStatusCode.Created, r2.StatusCode);
+
+        // Fetch batches filtered by ProductId
+        var response = await _client.GetAsync($"/api/inventory/batches?productId={product.Id}&page=1&pageSize=10");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var pagedResult = await response.Content.ReadFromJsonAsync<PagedResult<BatchResponse>>(JsonOptions);
+        Assert.NotNull(pagedResult);
+        Assert.Equal(2, pagedResult.TotalCount);
+        Assert.Equal(2, pagedResult.Items.Count);
+        Assert.Equal(1, pagedResult.Page);
+        Assert.Equal(10, pagedResult.PageSize);
+
+        // Verify product info mapping on each batch
+        Assert.All(pagedResult.Items, b =>
+        {
+            Assert.Equal(product.Id, b.ProductId);
+            Assert.Equal(product.Sku, b.ProductSku);
+            Assert.Equal(product.Name, b.ProductName);
+            Assert.Equal(0, b.ReservedQuantity);
+            Assert.Equal(b.PhysicalQuantity, b.AvailableQuantity);
+        });
+    }
+
+    [Fact]
+    public async Task GetBatches_WithStatusFilter_ReturnsOnlyMatchingStatus()
+    {
+        var product = await CreateTestProductAsync("BATCH-STAT");
+        var prodDate = DateOnly.FromDateTime(DateTime.UtcNow);
+
+        // 1. Create PendingRelease batch
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-PND-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = prodDate,
+            Quantity = 30
+        };
+        var r = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        Assert.Equal(HttpStatusCode.Created, r.StatusCode);
+        var receipt = await r.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        // 2. Query for PendingRelease
+        var respPending = await _client.GetAsync($"/api/inventory/batches?productId={product.Id}&status=PendingRelease");
+        Assert.Equal(HttpStatusCode.OK, respPending.StatusCode);
+        var pendingResult = await respPending.Content.ReadFromJsonAsync<PagedResult<BatchResponse>>(JsonOptions);
+        Assert.NotNull(pendingResult);
+        Assert.Single(pendingResult.Items);
+        Assert.Equal("PendingRelease", pendingResult.Items[0].Status);
+
+        // 3. Query for Released (should be empty for this product)
+        var respReleased = await _client.GetAsync($"/api/inventory/batches?productId={product.Id}&status=Released");
+        Assert.Equal(HttpStatusCode.OK, respReleased.StatusCode);
+        var releasedResult = await respReleased.Content.ReadFromJsonAsync<PagedResult<BatchResponse>>(JsonOptions);
+        Assert.NotNull(releasedResult);
+        Assert.Empty(releasedResult.Items);
+    }
+
+    [Fact]
+    public async Task GetBatches_WithSorting_OrdersCorrectly()
+    {
+        var response = await _client.GetAsync("/api/inventory/batches?sortBy=productionDate&sortDescending=true&page=1&pageSize=5");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var pagedResult = await response.Content.ReadFromJsonAsync<PagedResult<BatchResponse>>(JsonOptions);
+        Assert.NotNull(pagedResult);
+    }
+
+    [Fact]
+    public async Task GetBatches_WithInvalidPagination_ReturnsBadRequest()
+    {
+        // Page < 1
+        var respZeroPage = await _client.GetAsync("/api/inventory/batches?page=0&pageSize=10");
+        Assert.Equal(HttpStatusCode.BadRequest, respZeroPage.StatusCode);
+
+        // PageSize > 100
+        var respLargePageSize = await _client.GetAsync("/api/inventory/batches?page=1&pageSize=101");
+        Assert.Equal(HttpStatusCode.BadRequest, respLargePageSize.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetBatches_WhenNoMatch_ReturnsEmptyPagedResult()
+    {
+        var response = await _client.GetAsync("/api/inventory/batches?productId=999999");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var pagedResult = await response.Content.ReadFromJsonAsync<PagedResult<BatchResponse>>(JsonOptions);
+        Assert.NotNull(pagedResult);
+        Assert.Empty(pagedResult.Items);
+        Assert.Equal(0, pagedResult.TotalCount);
+    }
+
+    [Fact]
+    public async Task GetBatches_WithSearchFilter_MatchesBatchNoAndProductName()
+    {
+        var product = await CreateTestProductAsync("BATCH-SRCH");
+        var batchNo = $"BAT-SRCH-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}";
+
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = batchNo,
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            Quantity = 25
+        };
+        var r = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        Assert.Equal(HttpStatusCode.Created, r.StatusCode);
+
+        // Search by BatchNo snippet (case-insensitive)
+        var respSearch = await _client.GetAsync($"/api/inventory/batches?search={batchNo[..8].ToLowerInvariant()}");
+        Assert.Equal(HttpStatusCode.OK, respSearch.StatusCode);
+        var searchResult = await respSearch.Content.ReadFromJsonAsync<PagedResult<BatchResponse>>(JsonOptions);
+        Assert.NotNull(searchResult);
+        Assert.Contains(searchResult.Items, b => b.BatchNo == batchNo);
+    }
+
+    [Fact]
+    public async Task GetBatches_WithUnknownSortBy_FallsBackToDefaultSorting()
+    {
+        var response = await _client.GetAsync("/api/inventory/batches?sortBy=unrecognizedColumn&page=1&pageSize=5");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var pagedResult = await response.Content.ReadFromJsonAsync<PagedResult<BatchResponse>>(JsonOptions);
+        Assert.NotNull(pagedResult);
+    }
 }

@@ -1,10 +1,12 @@
 using AbonStock.Api.Common;
 using AbonStock.Api.Dtos.Inventory;
 using AbonStock.Api.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AbonStock.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
@@ -34,14 +36,25 @@ public class InventoryController(IInventoryService inventoryService) : Controlle
         return Ok(response);
     }
 
+    [Authorize(Roles = "Admin")]
     [HttpPost("adjustments")]
     [ProducesResponseType(typeof(StockAdjustmentResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> AdjustStock([FromBody] StockAdjustmentRequest request, CancellationToken ct)
     {
         var response = await _inventoryService.AdjustStockAsync(request, ct);
+        return Ok(response);
+    }
+
+    [HttpGet("batches")]
+    [ProducesResponseType(typeof(PagedResult<BatchResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetBatches([FromQuery] BatchListQuery query, CancellationToken ct)
+    {
+        var response = await _inventoryService.GetBatchesAsync(query, ct);
         return Ok(response);
     }
 
