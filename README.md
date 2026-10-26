@@ -1,138 +1,182 @@
-# AbonStock API
+# AbonStock — Full-Stack Inventory & Order Fulfillment System
 
 [![.NET](https://img.shields.io/badge/.NET-8.0-blue.svg)](https://dotnet.microsoft.com/)
+[![React](https://img.shields.io/badge/React-18.3-61dafb.svg)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://www.typescriptlang.org/)
+[![Vite](https://img.shields.io/badge/Vite-5.4-646cff.svg)](https://vitejs.dev/)
 [![Entity Framework Core](https://img.shields.io/badge/EF%20Core-8.0-purple.svg)](https://learn.microsoft.com/en-us/ef/core/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue.svg)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/Tests-113%20Passed-brightgreen.svg)]()
+[![Unit Tests](https://img.shields.io/badge/Unit%20Tests-137%20Passed-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-green.svg)]()
 
-Production-grade Inventory Tracking and Order Fulfillment Web API for artisanal food manufacturers (specifically Indonesian Abon / Shredded Meat producers). Built with **ASP.NET Core 8**, **Entity Framework Core 8**, and **PostgreSQL 16**.
+A full-stack, concurrent-safe inventory tracking and order fulfillment platform engineered for artisanal food manufacturers (specifically Indonesian shredded meat / *Abon* producers). Built with an **ASP.NET Core 8 Web API**, **Entity Framework Core 8**, **PostgreSQL 16**, and a modern **React 18 + TypeScript + Vite** Single Page Application.
 
 ---
 
-## 1. Project Overview & Problem Solved
+## 1. Project Overview & Business Domain
 
-Artisanal food manufacturing (such as shredded beef and chicken—*Abon*) requires strict batch traceability, quality control, deterministic inventory allocation, and transaction integrity. Small-to-medium producers often suffer from:
-- **Overselling & Race Conditions:** Concurrent customer orders competing for the same inventory batches leading to negative stock or over-commitment.
-- **Lack of Traceability:** Inability to pinpoint which production batch fulfilled which customer order, creating recall and compliance risks.
-- **Double Deductions:** Lack of database-level idempotency leading to accidental duplicate inventory deductions during fulfillment retries.
-- **Uncontrolled Allocations:** Non-deterministic batch selection causing older batches to expire before being shipped.
+Artisanal food manufacturing involves short shelf-life batches, strict quality control requirements, and high transaction volumes during distribution peaks. Small-to-medium producers face severe operational risks:
+- **Overselling & Race Conditions:** Concurrent orders competing for the same limited batch stock leading to negative inventory or over-commitment.
+- **Traceability & Recall Inability:** Inability to track which production batch fulfilled which customer order, creating critical compliance and food safety recall risks.
+- **Duplicate Stock Deductions:** Network retries or accidental double-clicks during fulfillment leading to duplicate physical deductions.
+- **Inventory Expiration Waste:** Non-deterministic batch selection causing older batches to expire in the warehouse while newer inventory is shipped.
 
-**AbonStock** addresses these operational challenges with a robust backend architecture featuring:
-- **Strict FIFO Allocation:** Batches are allocated by earliest production date (`ProductionDate ASC, Id ASC`).
-- **Pessimistic & Optimistic Concurrency:** Canonical PostgreSQL row-level locking (`FOR UPDATE`) combined with PostgreSQL system column `xmin` concurrency tokens.
-- **Double-Deduction Prevention:** Application-level state validation reinforced by a PostgreSQL partial unique index on `StockMovements`.
-- **Atomic Stock Ledger:** Every physical change produces an immutable audit movement with before/after balances for both the batch and the product.
+**AbonStock** resolves these operational challenges through a concurrent-safe, auditable architecture:
+- **Strict FEFO/FIFO Allocation:** Customer orders reserve inventory deterministically from the earliest production batches (`ProductionDate ASC, Id ASC`).
+- **Pessimistic & Optimistic Concurrency:** Canonical PostgreSQL row-level locks (`SELECT ... FOR UPDATE`) prevent deadlocks, combined with PostgreSQL system column `xmin` concurrency tokens for stale read detection.
+- **Database-Level Double-Deduction Prevention:** Application-level order state guards reinforced by a PostgreSQL partial unique index on `StockMovements`.
+- **Immutable Stock Ledger:** Every physical adjustment or fulfillment writes an immutable movement record with before/after balances for both the individual batch and aggregate product inventory.
+- **Role-Based Security:** Enterprise JWT Bearer authentication enforcing distinct operational permissions for **Administrator** and **Warehouse Staff** roles across both backend endpoints and frontend interfaces.
 
 ---
 
-## 2. Key Features & Business Workflows
+## 2. Full-Stack Architecture
 
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                        React 18 + Vite SPA Client                      │
+│     (TypeScript, React Router v6, Lucide Icons, sessionStorage JWT)    │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ HTTP / JSON + Authorization: Bearer <token>
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                      ASP.NET Core 8 Web API Host                       │
+│  ├── Middleware Pipeline: CORS, Authentication, Authorization, RFC7807 │
+│  ├── Controllers: AuthController, Products, Inventory, Orders          │
+│  └── Services: AuthService, ProductService, InventoryService, Orders   │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ EF Core 8 / Npgsql
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                          PostgreSQL 16 Engine                          │
+│  ├── Canonical Lock Hierarchy (SELECT ... FOR UPDATE)                  │
+│  ├── Optimistic Concurrency via PostgreSQL system column `xmin`        │
+│  └── Idempotency Partial Unique Index ("IX_StockMovements_Order_Batch")│
+└────────────────────────────────────────────────────────────────────────┘
 ```
-[ Production ] ──> Receipt (PendingRelease) ──> QC Pass ──> Released
-                                                                │
-[ Sales ] ──> Create Order (Pending)                            ▼
-                    │                                   FIFO Allocation
-                    ▼                                           │
-             Confirm Order ─────────────────────────────> Active Reservation
-                    │                                           │
-          ┌─────────┴─────────┐                                 ▼
-          ▼                   ▼                           Fulfill Order
-    Cancel Order        Fulfill Order                           │
-          │                   │                                 ▼
-   Release Reserve     Deduct Physical Stock            StockMovement Ledger
-          │                   │                                 │
-          ▼                   ▼                                 ▼
-      Cancelled           Completed                    Physical Stock Decremented
-```
 
-1. **Product Catalog Management:**
-   - SKU uniqueness enforcement and normalization.
-   - Active status toggles and server-authoritative unit pricing.
-   - Aggregate inventory tracking (`QuantityOnHand`).
+### Directory Structure
 
-2. **Batch Production & QC Release:**
-   - Batches enter as `PendingRelease`.
-   - Explicit 3-point QC gate (`VisualCheckPassed`, `AromaCheckPassed`, `PackagingCheckPassed`) before transitioning to `Released`.
-   - Batch numbers unique per product (`IX_InventoryBatches_ProductId_BatchNo`).
-
-3. **Stock Adjustments & Waste Tracking:**
-   - Physical stock corrections with required audit reasons.
-   - Enforces invariant: physical quantity cannot fall below active reserved quantity.
-   - Auto-transitions batch to `Depleted` when physical quantity reaches zero.
-
-4. **Order Management & FIFO Reservations:**
-   - **Order Creation:** Orders start as `Pending` with server-calculated line totals; no stock is reserved or deducted at creation.
-   - **Order Confirmation:** Atomically evaluates eligible released batches, acquires row-level locks, and creates `OrderReservation` records using strict FIFO (`ProductionDate ASC, Id ASC`).
-   - **Order Cancellation:** Cancelling a `Confirmed` order atomically rolls back reservations without losing the historical audit trail.
-
-5. **Atomic Order Fulfillment:**
-   - Fulfills `Confirmed` orders atomically across multiple products and multi-batch allocations.
-   - Decrements physical stock and reserved stock simultaneously.
-   - Marks reservations as `Fulfilled` and orders as `Completed`.
-   - Writes immutable `OrderDeduction` entries to `StockMovements`.
-   - Protected against duplicate fulfillment via database-level partial unique constraints.
-
----
-
-## 3. Technology Stack
-
-- **Framework:** .NET 8 (C# 12)
-- **Web API:** ASP.NET Core Web API with minimal controllers, Problem Details (RFC 7807), and global exception handling.
-- **ORM:** Entity Framework Core 8.0.8
-- **Database Driver:** Npgsql.EntityFrameworkCore.PostgreSQL 8.0.8
-- **Database:** PostgreSQL 16 (Alpine container)
-- **Documentation:** OpenAPI / Swagger (Swashbuckle 6.6.2)
-- **Testing:** xUnit 2.5.3, `Microsoft.AspNetCore.Mvc.Testing` 8.0.8, Testcontainers-ready architecture with isolated test database fixtures.
-
----
-
-## 4. Architecture & Directory Structure
-
-```
+```text
 AbonStock/
-├── .env.example                     # Environment template for local Docker setup
-├── .gitignore                       # Standard .NET / Docker ignore rules
+├── .env.example                     # Environment template for local Docker PostgreSQL
+├── .gitignore                       # Repository-wide ignore rules (.NET, VS, secrets, logs)
 ├── AbonStock.sln                    # Visual Studio solution file
-├── docker-compose.yml               # PostgreSQL 16 local container definition
-├── docs/
-│   ├── architecture.md              # In-depth architectural & concurrency design
-│   ├── demo-evidence.md             # Verified API demonstration evidence & operational runbook
+├── docker-compose.yml               # PostgreSQL 16 container definition
+├── docs/                            # Architectural guides & portfolio runbooks
+│   ├── architecture.md              # In-depth concurrency, locking & relational schema
+│   ├── demo-evidence.md             # Baseline operational runbook & endpoint evidence
 │   ├── demo-walkthrough.md          # Step-by-step Swagger UI verification guide
-│   └── upwork-portfolio.md          # Technical summary & portfolio case study
+│   └── upwork-portfolio.md          # Upwork portfolio case study & technical breakdown
 ├── src/
-│   └── AbonStock.Api/
-│       ├── Common/
-│       │   ├── Exceptions/          # Custom domain exceptions (NotFound, Conflict, Validation)
-│       │   └── PagedResult.cs       # Pagination envelope
-│       ├── Controllers/             # API Endpoints (Products, Inventory, Orders)
-│       ├── Data/
-│       │   ├── AbonStockDbContext.cs# EF Core DbContext, constraints & index mappings
-│       │   ├── AbonStockDataSeeder.cs# Idempotent startup demo data seeder
-│       │   └── PostgresErrorCodes.cs# PostgreSQL SQLState constant mappings
-│       ├── Dtos/                    # Strongly-typed request/response records
+│   └── AbonStock.Api/               # ASP.NET Core 8 Web API project
+│       ├── Common/                  # Exceptions (NotFound, Conflict, Validation), PagedResult
+│       ├── Controllers/             # Products, Inventory, Orders, Auth controllers
+│       ├── Data/                    # AbonStockDbContext, AbonStockDataSeeder, Migrations
+│       ├── Dtos/                    # Strongly typed request/response records
 │       ├── Entities/                # Relational domain models
-│       ├── Middleware/              # RFC 7807 GlobalExceptionHandler
-│       ├── Migrations/              # EF Core database migrations
-│       ├── Services/                # Business logic & transactional operations
-│       ├── appsettings.json         # Base configuration
-│       ├── appsettings.Development.json # Development configuration
-│       └── Program.cs               # Host configuration & DI pipeline
-└── tests/
-    └── AbonStock.Tests/
-        ├── Common/                  # Test helpers & orderers
-        ├── Integration/             # PostgreSQL database integration tests
-        │   ├── DataSeederIntegrationTests.cs
-        │   ├── InventoryIntegrationTests.cs
-        │   ├── OrderIntegrationTests.cs
-        │   ├── PostgresTestFixture.cs
-        │   ├── ProductIntegrationTests.cs
-        │   └── ReservationSchemaTests.cs
-        └── Unit/                    # Domain validation unit tests
-            ├── InventoryValidationTests.cs
-            ├── OrderValidationTests.cs
-            └── ProductServiceTests.cs
+│       ├── Middleware/              # GlobalExceptionHandler (RFC 7807 ProblemDetails)
+│       ├── Services/                # Business logic, lock ordering, JWT token generation
+│       ├── appsettings.json         # Base configuration (with safe placeholders)
+│       ├── appsettings.Development.json # Development CORS policy (localhost:5173, localhost:3000)
+│       └── Program.cs               # Host configuration, JWT authentication, and DI pipeline
+├── tests/
+│   └── AbonStock.Tests/             # Automated test suite (xUnit)
+│       ├── Common/                  # Test fixtures & ordering helpers
+│       ├── Integration/             # 73 PostgreSQL database integration tests
+│       └── Unit/                    # 96 in-memory unit tests (Auth, RBAC, CORS, Domain)
+└── frontend/                        # React 18 + TypeScript + Vite Single Page Application
+    ├── .env.example                 # Frontend environment template (VITE_API_BASE_URL)
+    ├── .gitignore                   # Ignore rules for node_modules, dist, and local .env
+    ├── package.json                 # Dependencies and npm/pnpm scripts
+    ├── tsconfig.json                # Strict TypeScript configuration
+    ├── vite.config.ts               # Vite configuration and path aliases
+    └── src/
+        ├── app/                     # App.tsx (AuthProvider wrapper), router.tsx
+        ├── components/              # AppLayout, Navbar, ProtectedRoute, common modal/table UI
+        ├── context/                 # AuthContext.tsx (sessionStorage token lifecycle & RBAC)
+        ├── features/                # auth (LoginPage), inventory, orders, products
+        ├── lib/                     # apiClient.ts (Bearer token injection, 401/403 handlers)
+        ├── services/                # authService, productsService, inventoryService, ordersService
+        ├── styles/                  # index.css (modular responsive design system)
+        └── types/                   # TypeScript interfaces (auth, common, inventory, orders, products)
 ```
+
+---
+
+## 3. Verified Features & Business Workflows
+
+### A. Product Catalog Management
+- SKU uniqueness enforcement and normalization.
+- Active/Inactive status toggles and server-authoritative pricing.
+- Real-time aggregate inventory tracking (`QuantityOnHand`).
+- Product creation, modification, and deactivation restricted strictly to **Admin** role.
+
+### B. Batch Tracking & 3-Point Quality Gate
+- Physical production batches initialized in `PendingRelease` status.
+- Mandatory 3-point QC gate (`VisualCheckPassed`, `AromaCheckPassed`, `PackagingCheckPassed`) before transitioning to `Released`.
+- Per-product batch number uniqueness (`IX_InventoryBatches_ProductId_BatchNo`).
+- QC inspection and stock receipt accessible to both **Staff** and **Admin**.
+
+### C. Stock Adjustments & Wastage Tracking
+- Physical stock corrections requiring documented audit reasons.
+- Invariant guard: physical quantity cannot fall below active reserved quantity.
+- Automatic transition to `Depleted` when physical quantity reaches zero.
+- Manual stock adjustments restricted strictly to **Admin** role.
+
+### D. Order Lifecycle & Deterministic FEFO Allocation
+- **Creation (`Pending`):** Orders calculate line items and totals server-side; no stock is locked or reserved at draft creation.
+- **Confirmation (`Confirmed`):** Atomically evaluates eligible `Released` batches using strict FEFO (`ProductionDate ASC, Id ASC`), acquires pessimistic row locks (`FOR UPDATE`), and creates `OrderReservation` records.
+- **Cancellation (`Cancelled`):** Atomically rolls back reservations without losing audit continuity.
+- **Fulfillment (`Completed`):** Atomically deducts physical stock, clears reservations, transitions status to `Completed`, and writes immutable `OrderDeduction` entries to `StockMovements`.
+
+### E. Concurrency & Idempotency Safeguards
+- **PostgreSQL `xmin` Optimistic Concurrency:** System column `xmin` mapped to entity versions (`uint Version`), detecting concurrent stale updates with `409 Conflict`.
+- **Three-Tier Canonical Lock Hierarchy:** Deterministic locking sequence (`Orders` $\rightarrow$ `InventoryBatches` $\rightarrow$ `Products`) guarantees circular deadlocks cannot occur.
+- **Database-Level Partial Unique Index:**
+  ```sql
+  CREATE UNIQUE INDEX "IX_StockMovements_Order_Batch_Deduction"
+  ON "StockMovements" ("ReferenceOrderId", "InventoryBatchId")
+  WHERE "ReferenceOrderId" IS NOT NULL AND "InventoryBatchId" IS NOT NULL AND "MovementType" = 3;
+  ```
+  Prevents duplicate fulfillment deductions at the database storage engine layer.
+
+---
+
+## 4. Authentication & Role-Based Authorization
+
+The application uses ASP.NET Core JWT Bearer authentication with an enforced `FallbackPolicy` (all endpoints require authentication unless explicitly marked `[AllowAnonymous]`).
+
+### Authentication Endpoints
+- `POST /api/auth/login` (`[AllowAnonymous]`): Validates credentials using `PasswordHasher<DemoUser>` (PBKDF2 with unique salts), returning an HS256-signed JWT token (8-hour expiry). Returns a generic error (`"Invalid username or password."`) on failure to prevent username enumeration.
+- `GET /api/auth/me`: Validates the caller's JWT token and returns the authenticated user's ID, username, display name, and role.
+
+### Endpoint Role Matrix
+
+| Endpoint | Method | Operation Description | Access Permission | Unauthenticated / Forbidden |
+| :--- | :---: | :--- | :---: | :---: |
+| `/api/auth/login` | `POST` | Authenticate and obtain JWT token | Public (Anonymous) | `400 Bad Request` / `401 Unauthorized` |
+| `/api/auth/me` | `GET` | Get current user identity & role | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/products` | `GET` | Search and list products | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/products/{id}` | `GET` | View product details | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/products` | `POST` | Create new product | **`Admin` Only** | `401 Unauthorized` / **`403 Forbidden`** |
+| `/api/products/{id}` | `PUT` | Update product details | **`Admin` Only** | `401 Unauthorized` / **`403 Forbidden`** |
+| `/api/products/{id}/deactivate` | `PATCH` | Deactivate product | **`Admin` Only** | `401 Unauthorized` / **`403 Forbidden`** |
+| `/api/inventory/batches` | `GET` | List inventory batches | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/inventory/batches/{id}` | `GET` | View batch details | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/inventory/movements` | `GET` | View stock ledger audit trail | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/inventory/receipts` | `POST` | Receive new stock from factory | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/inventory/batches/{id}/release` | `POST` | Perform QC inspection & release | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/inventory/adjustments` | `POST` | Adjust physical batch stock | **`Admin` Only** | `401 Unauthorized` / **`403 Forbidden`** |
+| `/api/orders` | `GET` | List and filter orders | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/orders/{id}` | `GET` | View order details | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/orders` | `POST` | Create new draft order | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/orders/{id}/confirm` | `POST` | Confirm order & reserve FEFO stock | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/orders/{id}/cancel` | `POST` | Cancel order & release reservations| `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/orders/{id}/fulfill` | `POST` | Fulfill order & deduct stock | `Staff`, `Admin` | `401 Unauthorized` |
+
+> [!IMPORTANT]
+> **Authoritative Security Boundary:** The backend API strictly enforces permissions via `[Authorize(Roles = "Admin")]`. Hiding action buttons in the React UI for `Staff` is purely a user experience enhancement; direct API requests from unauthorized accounts are strictly rejected with `403 Forbidden`.
 
 ---
 
@@ -140,31 +184,15 @@ AbonStock/
 
 ### Prerequisites
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (v8.0.x or higher)
+- [Node.js](https://nodejs.org/) (v18.0.0 or higher; v20+ recommended)
+- Package Manager: `pnpm` (recommended) or `npm`
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine
 - PowerShell 7+ or Bash terminal
 
-### 1. Clone the Repository
-```bash
-git clone https://github.com/reyzaarys/AbonStock.git
-cd AbonStock
-```
+---
 
-### 2. Configure Environment Variables
-Copy `.env.example` to `.env` (or configure your local environment):
-```bash
-cp .env.example .env
-```
-
-Configuration parameters defined in `.env.example`:
-- `POSTGRES_USER`: Database username
-- `POSTGRES_PASSWORD`: Database user password
-- `POSTGRES_DB`: Target development database name (`abonstock_db`)
-- `POSTGRES_PORT`: Exposed host port (`5432`)
-
-> [!NOTE]
-> Review `.env.example` for local defaults. For staging or production environments, always set strong passwords via your secret management system. Never commit real credentials to version control.
-
-### 3. Start PostgreSQL Container
+### Step 1: Start PostgreSQL Container
+Start the local PostgreSQL 16 Alpine container:
 ```bash
 docker compose up -d
 ```
@@ -172,105 +200,155 @@ Verify the container is healthy:
 ```bash
 docker ps --filter "name=abonstock-postgres"
 ```
+The database container exposes port `5432` with username `abonstock` and database `abonstock_db` (see `.env.example`).
 
 ---
 
-## 6. Database Migrations & Running the API
+### Step 2: Configure Backend Environment Variables
+To defend against insecure deployments, `src/AbonStock.Api` implements a **fail-fast startup check**: it refuses to start if placeholder keys or connection strings are detected.
 
-### Apply Database Migrations
-Run the EF Core migration command pointing to the development database:
-```bash
-dotnet ef database update --project src/AbonStock.Api
+Environment variables must be configured in the active terminal session used to launch the API or execute migrations. These session-scoped environment variables exist in process memory only and are never committed to version control.
+
+> [!TIP]
+> For comprehensive full-stack setup, dynamic secret generation, database isolation safety gates, and end-to-end troubleshooting, refer to the [Safe Local Development Guide](docs/local-development.md).
+
+**PowerShell:**
+```powershell
+# 1. Set database connection string (replace placeholder with your local PostgreSQL password)
+$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=<your_local_pg_password>"
+
+# 2. Generate a dynamic 256-bit cryptographically secure JWT signing key for this session
+$env:Jwt__SecretKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+
+# 3. Configure demo user password for this session (must choose a strong, unique password before executing)
+$env:Auth__DefaultPassword = "<choose_a_strong_local_password>"
 ```
 
-### Run the Web API
+**Bash:**
+```bash
+# 1. Set database connection string (replace placeholder with your local PostgreSQL password)
+export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=<your_local_pg_password>"
+
+# 2. Generate a dynamic 256-bit secure JWT signing key
+export Jwt__SecretKey=$(openssl rand -base64 32)
+
+# 3. Configure demo user password for this session (must choose a strong, unique password before executing)
+export Auth__DefaultPassword="<choose_a_strong_local_password>"
+```
+
+> [!NOTE]
+> The `<choose_a_strong_local_password>` and `<your_local_pg_password>` placeholders must be replaced with your actual chosen passwords before execution; they are not working credentials. If `$env:Auth__DefaultPassword` is omitted, the API will start safely but all login attempts will return HTTP 401 Unauthorized as a security safeguard. Never commit real secrets or production connection strings to version control.
+
+---
+
+### Step 3: Apply Database Migrations & Seed Demo Data
+
+1. **Apply Migrations:**
+   Migrations are never executed automatically at startup. Ensure `$env:ConnectionStrings__DefaultConnection` is configured in your active terminal session, then apply migrations using EF Core CLI:
+   ```bash
+   dotnet ef database update --project src/AbonStock.Api
+   ```
+
+2. **Database Seeding (Explicit Opt-In):**
+   `Seeding:AutoSeed` is set to `false` by default in `appsettings.json`. If you wish to populate demo products, batches, and orders on initial launch, set the opt-in flag:
+   ```powershell
+   $env:Seeding__AutoSeed = "true"
+   ```
+   *(The seeder is idempotent and acquires PostgreSQL transaction advisory locks to prevent duplicate writes).*
+
+---
+
+### Step 4: Run the Backend Web API
+In Terminal 1:
 ```bash
 dotnet run --project src/AbonStock.Api --launch-profile http
 ```
-The API starts on `http://localhost:5299`.
-
-### Access Swagger UI
-Open your browser and navigate to:
-```
-http://localhost:5299/swagger
-```
+The API starts listening at `http://localhost:5299`.
+- **Interactive Swagger UI:** Navigate to `http://localhost:5299/swagger`.
 
 ---
 
-## 7. Development Data Seeding
-
-When the API runs in the `Development` environment (`app.Environment.IsDevelopment()`), `AbonStockDataSeeder` automatically populates realistic demo data:
-
-| Entity | Details |
-| :--- | :--- |
-| **Products** | • `ABON-SAPI-ORI-100` (Abon Sapi Original 100g, Rp 35.000)<br>• `ABON-SAPI-PDS-100` (Abon Sapi Pedas 100g, Rp 37.500)<br>• `ABON-AYAM-GRH-100` (Abon Ayam Gurih 100g, Rp 28.000) |
-| **Batches** | • `BAT-202609-SO01`: Depleted historical batch (0 phys / 0 res)<br>• `BAT-202610-SO02`: Released batch (100 phys / 20 res)<br>• `BAT-202610-SO03`: Released batch without expiry (50 phys / 0 res)<br>• `BAT-202610-SP01`: Released batch (80 phys / 15 res)<br>• `BAT-202610-AG01`: Released batch (60 phys / 0 res) |
-| **Orders** | • `ORD-20260915-DEMO-001`: **Completed** (historical fulfillment)<br>• `ORD-20261018-DEMO-002`: **Confirmed** (active reservations, ready to fulfill)<br>• `ORD-20261019-DEMO-003`: **Pending** (ready to confirm & fulfill in demo)<br>• `ORD-20261017-DEMO-004`: **Cancelled** (audit trail of released reservation) |
-
-### Seeder Concurrency & Idempotency
-- **Natural Key Checks:** Avoids redundant writes if demo SKUs already exist.
-- **PostgreSQL Advisory Lock:** Acquires `pg_try_advisory_xact_lock(0x41626F6E53746F63)` inside an explicit transaction, ensuring safety across multiple concurrent instances or container restarts.
-- **Environment Boundary:** Seeding is completely disabled during automated testing (`builder.UseEnvironment("Testing")`), ensuring test database isolation.
-
----
-
-## 8. Running Automated Tests
-
-The solution contains a comprehensive test suite of **113 automated tests** (40 unit tests and 73 PostgreSQL integration tests).
-
+### Step 5: Run the Frontend React Application
+In Terminal 2:
 ```bash
-dotnet test
+cd frontend
+
+# 1. Configure environment file
+cp .env.example .env
+
+# 2. Install dependencies
+pnpm install   # or npm install
+
+# 3. Start development server
+pnpm dev       # or npm run dev
+```
+The web application is accessible at `http://localhost:5173`.
+- Authenticate using the configured demo accounts (`admin` or `staff` with your configured password).
+
+---
+
+## 6. Running Automated Tests
+
+The repository contains automated unit and integration test suites:
+
+### 1. Run Backend Unit Tests (In-Memory / Fast)
+Executes 96 in-memory unit tests covering authentication, RBAC, domain validations, CORS configuration, and startup safety guards:
+```bash
+dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj --filter FullyQualifiedName~Unit
 ```
 
-### Test Suite Structure
-1. **Unit Tests (`tests/AbonStock.Tests/Unit/`):**
-   - In-memory domain validation tests for order lines, product SKUs, prices, batch statuses, and QC rules.
-2. **Integration Tests (`tests/AbonStock.Tests/Integration/`):**
-   - Executed against a dedicated PostgreSQL database (`abonstock_test_db`).
-   - Covers concurrency conflicts, multi-batch fulfillment, deadlocks, transaction rollbacks, partial unique constraints, and seeder idempotency.
+### 2. Run Frontend Unit Tests (Node.js Native Test Runner)
+Executes 41 frontend unit tests covering `apiClient`, `authService`, `AuthContext`, session restoration, and role visibility:
+```bash
+cd frontend
+pnpm test     # or npm test
+```
+
+### 3. Run Frontend Type Check & Production Build
+```bash
+cd frontend
+pnpm exec tsc -b
+pnpm run build
+```
+
+### 4. Run PostgreSQL Integration Tests (Requires Active PostgreSQL)
+*Note: The 73 database integration tests run against a dedicated test database (`abonstock_test_db`). Ensure PostgreSQL is running before executing:*
+```bash
+dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj --filter FullyQualifiedName~Integration
+```
 
 ---
 
-## 9. Concurrency & Transactional Integrity
+## 7. Verified Test Metrics (Stage 11.4 Verification)
 
-### A. Optimistic Concurrency via PostgreSQL `xmin`
-All mutable entities (`Product`, `InventoryBatch`, `Order`) map an unsigned integer property `Version` to PostgreSQL's native system column `xmin` using EF Core's `IsRowVersion()`:
-- When a client sends a request with `RowVersion`, EF Core appends `WHERE "xmin" = @pOriginalVersion` to update queries.
-- If another transaction modified the row, PostgreSQL updates 0 rows, triggering `DbUpdateConcurrencyException`, translated by the API into `409 Conflict` (RFC 7807 `ProblemDetails`).
+The following test counts were verified during Stage 11.4 automated execution:
 
-### B. Pessimistic Row-Level Locking & Canonical Lock Hierarchy
-To prevent circular-wait deadlocks during multi-item orders, `OrderService` locks database rows in a strictly ordered canonical sequence:
-1. **Order Row:** `SELECT "Id" FROM "Orders" WHERE "Id" = {id} FOR UPDATE`
-2. **Inventory Batches:** `SELECT ... FROM "InventoryBatches" WHERE "Id" = ANY(...) ORDER BY "ProductionDate" ASC, "Id" ASC FOR UPDATE`
-3. **Products:** `SELECT ... FROM "Products" WHERE "Id" = ANY(...) ORDER BY "Id" ASC FOR UPDATE`
+| Test Suite | Framework / Runner | Total Tests | Status | Scope |
+| :--- | :--- | :---: | :---: | :--- |
+| **Backend Unit Tests** | xUnit + `WebApplicationFactory` | **96** | **96 Passed (100%)** | JWT issuance, claims validation, 401/403 RBAC guards, CORS, startup validation |
+| **Frontend Unit Tests** | Node.js Test Runner (`--experimental-strip-types`) | **41** | **41 Passed (100%)** | Bearer token injection, session restoration, role-aware UI logic, API client error mapping |
+| **Backend Integration Tests** | xUnit + PostgreSQL Fixture | **73** | *Unverified in Stage 11.4* | Exists in repository; intentionally skipped in Stage 11.4 to protect the demo database |
 
-### C. Double-Fulfillment Prevention
-Double stock deduction is prevented at two independent layers:
-1. **Application Logic:** Orders must strictly be in `Confirmed` status. If already `Completed`, the request is rejected with `409 Conflict`.
-2. **PostgreSQL Partial Unique Index:**
-   ```sql
-   CREATE UNIQUE INDEX "IX_StockMovements_Order_Batch_Deduction" 
-   ON "StockMovements" ("ReferenceOrderId", "InventoryBatchId") 
-   WHERE "ReferenceOrderId" IS NOT NULL AND "InventoryBatchId" IS NOT NULL AND "MovementType" = 3;
-   ```
-   If two concurrent requests attempt to deduct stock from the same batch for the same order, PostgreSQL enforces this unique constraint and rejects the second transaction with `409 Conflict`.
+> **Aggregate Status:** Out of 210 total tests across reported suites in the repository, **137 unit tests were verified passed with 0 failures** during Stage 11.4, while 73 database integration tests remain unverified until executed against an isolated test database.
 
 ---
 
-## 10. Known Limitations (Milestone 1 Scope)
+## 8. Technical & Security Limitations
 
-This repository represents Milestone 1 (M1) focusing on core inventory and fulfillment mechanics:
-- **Authentication & Authorization:** M1 is an open internal API without JWT or Identity scaffolding.
-- **Payment Gateway:** Payment processing is out of scope; orders are placed directly by internal staff or sales representatives.
-- **Location Support:** Single-facility inventory only (`LOC_KDR_PROD`). Multi-warehouse routing is slated for future milestones.
-- **UTC Date Evaluation:** Expiry validation compares UTC dates directly against PostgreSQL `date` columns without local WIB timezone shifts.
+To maintain transparency for technical reviewers:
+- **Token Storage:** JWT tokens are stored in browser `sessionStorage`. While this ensures session isolation per tab and automatic purging when the tab closes, tokens remain accessible to JavaScript in the same origin if an XSS vulnerability were introduced.
+- **Refresh Token Mechanism:** The current implementation uses single-lifetime tokens (8 hours). No silent background refresh-token rotation is implemented.
+- **Single Warehouse Facility:** Inventory logic currently operates within a single facility (`LOC_KDR_PROD`). Multi-warehouse inter-facility routing is slated for future milestones.
+- **Timezone Handling:** Expiry validation compares UTC dates directly against PostgreSQL `date` columns without local WIB timezone offset conversions.
+- **Live E2E Verification:** Automated unit test coverage is comprehensive (137 tests); however, automated headless browser end-to-end integration (e.g. Playwright / Cypress) has not yet been executed in CI.
 
 ---
 
-## 11. Documentation Links
+## 9. Documentation Directory
 
-For deeper technical deep-dives:
-- [Architecture & Concurrency Guide](docs/architecture.md)
-- [Interactive Swagger Demo Walkthrough](docs/demo-walkthrough.md)
-- [Verified API Demonstration Evidence & Runbook](docs/demo-evidence.md)
-- [Upwork Portfolio Case Study](docs/upwork-portfolio.md)
+For deeper architectural breakdowns and runbooks:
+- [Safe Local Development Guide](docs/local-development.md) — Safe local onboarding, dynamic secret generation, database isolation safety gates, and troubleshooting.
+- [Architecture & Concurrency Guide](docs/architecture.md) — Detailed lock hierarchies, PostgreSQL `xmin` mechanics, and ER diagrams.
+- [Upwork Portfolio Case Study](docs/upwork-portfolio.md) — Executive summary, technical decisions, and interview pitch snippets.
+- [Interactive Swagger Demo Walkthrough](docs/demo-walkthrough.md) — Step-by-step Swagger UI verification guide.
+- [Verified API Demonstration Evidence](docs/demo-evidence.md) — Operational runbook and verified JSON responses.

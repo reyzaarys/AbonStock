@@ -1,332 +1,405 @@
-# AbonStock — Interactive Swagger Demo Walkthrough
+# AbonStock — Interactive Demo Walkthrough & Verification Runbook
 
-This guide provides step-by-step instructions for testing and demonstrating the **AbonStock API** via Swagger UI or curl.
+This guide provides step-by-step instructions for demonstrating the **AbonStock** platform via **Swagger UI** and the **React Web Frontend**.
 
 ---
 
-## 1. Starting the Application & Accessing Swagger UI
+## 1. Prerequisites & Environment Startup
 
-### Step 1: Ensure PostgreSQL Container is Running
+### Required Configuration
+AbonStock enforces a **fail-fast startup defense**: the backend API will immediately refuse to start (`InvalidOperationException`) if placeholder keys or connection strings are detected.
+
+Ensure the following configuration is supplied via environment variables before starting the backend:
+- `ConnectionStrings__DefaultConnection`: Target PostgreSQL 16 connection string.
+- `Jwt__SecretKey`: Cryptographically secure signing key (minimum 32 characters / 256 bits for HS256).
+- `Auth__DefaultPassword`: Password assigned to pre-configured demo accounts (`admin` and `staff`).
+
+---
+
+### Step 1: Start PostgreSQL Container
+Start the local PostgreSQL 16 Alpine container via Docker Compose:
 ```bash
 docker compose up -d
 ```
-
-### Step 2: Run the API (Development Profile)
+Verify the container is healthy:
 ```bash
+docker ps --filter "name=abonstock-postgres"
+```
+
+---
+
+### Step 2: Set Environment Variables & Start the Web API
+In **Terminal 1**:
+
+**PowerShell:**
+```powershell
+# 1. Supply your local PostgreSQL connection string (see docker-compose.yml / .env.example)
+$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=<your_local_pg_password>"
+
+# 2. Generate a dynamic 256-bit cryptographically secure JWT signing key for this session
+$env:Jwt__SecretKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+
+# 3. Configure a chosen local password for demo users (admin, staff) in this session
+$env:Auth__DefaultPassword = "<choose_a_strong_local_password>"
+
+# Optional: Enable idempotent demo data seeder if starting with an empty database
+# $env:Seeding__AutoSeed = "true"
+
 dotnet run --project src/AbonStock.Api --launch-profile http
 ```
-The application will start listening on `http://localhost:5299`.
 
-### Step 3: Open Swagger UI
-Open your web browser and navigate to:
+**Bash:**
+```bash
+# 1. Supply your local PostgreSQL connection string
+export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=<your_local_pg_password>"
+
+# 2. Generate a dynamic 256-bit secure JWT signing key
+export Jwt__SecretKey=$(openssl rand -base64 32)
+
+# 3. Configure a chosen local password for demo users
+export Auth__DefaultPassword="<choose_a_strong_local_password>"
+
+# Optional: Enable idempotent demo data seeder
+# export Seeding__AutoSeed="true"
+
+dotnet run --project src/AbonStock.Api --launch-profile http
 ```
-http://localhost:5299/swagger
-```
+
+> [!TIP]
+> For complete onboarding instructions, database isolation safety gates, and volume caveats, refer to the [Safe Local Development Guide](local-development.md).
+
+The Web API starts listening at `http://localhost:5299`.
+- Confirm Swagger UI is accessible: open `http://localhost:5299/swagger`.
 
 > [!NOTE]
-> The demo data seeder runs automatically upon startup only when `ASPNETCORE_ENVIRONMENT=Development`. In production or testing environments, the seeder does not execute.
+> `Seeding:AutoSeed` is disabled (`false`) by default. If your database already contains tables and data from previous runs, do not enable seeding. Migrations must be applied using `dotnet ef database update --project src/AbonStock.Api`.
 
 ---
 
-## 2. Pre-Seeded Demo Dataset Status
+### Step 3: Start the React Frontend Application
+In **Terminal 2**:
+```bash
+cd frontend
 
-Upon initial launch in Development mode, the database contains:
+# Ensure .env is present (points VITE_API_BASE_URL to http://localhost:5299)
+cp .env.example .env
 
-### Products
-| ID | SKU | Name | Unit Price | Initial Stock |
-| :---: | :--- | :--- | :---: | :---: |
-| **1** | `ABON-SAPI-ORI-100` | Abon Sapi Original 100g | Rp 35.000 | 150 |
-| **2** | `ABON-SAPI-PDS-100` | Abon Sapi Pedas 100g | Rp 37.500 | 80 |
-| **3** | `ABON-AYAM-GRH-100` | Abon Ayam Gurih 100g | Rp 28.000 | 60 |
-
-### Inventory Batches
-| ID | Batch No | Product | Status | Physical Qty | Reserved Qty | Expiry |
-| :---: | :--- | :--- | :---: | :---: | :---: | :---: |
-| **1** | `BAT-202609-SO01` | Sapi Original | `Depleted` | 0 | 0 | Expired |
-| **2** | `BAT-202610-SO02` | Sapi Original | `Released` | 100 | 20 | +6 Mos |
-| **3** | `BAT-202610-SO03` | Sapi Original | `Released` | 50 | 0 | None (Non-expiring) |
-| **4** | `BAT-202610-SP01` | Sapi Pedas | `Released` | 80 | 15 | +6 Mos |
-| **5** | `BAT-202610-AG01` | Ayam Gurih | `Released` | 60 | 0 | +4 Mos |
-
-### Pre-Seeded Orders & Statuses
-| ID | Order Number | Customer | Status | Details |
-| :---: | :--- | :--- | :---: | :--- |
-| **1** | `ORD-20260915-DEMO-001` | Toko Retail Demo A | `Completed` | Historical fulfillment of Batch 1. |
-| **2** | `ORD-20261018-DEMO-002` | Restoran Demo B | `Completed`* | Fulfilled during development verification. |
-| **3** | `ORD-20261019-DEMO-003` | Katering Demo C | `Pending` | **Primary order for testing the full lifecycle!** |
-| **4** | `ORD-20261017-DEMO-004` | Distributor Demo D | `Cancelled` | Audit trail of cancelled order with released reservation. |
-
-*\* Note: Once an order reaches `Completed`, it cannot be re-fulfilled. Use Order 3 (or create a new order) to test confirmation and fulfillment.*
-
----
-
-## 3. Scenario A: Complete Lifecycle (Pending → Confirmed → Completed)
-
-In this scenario, you will take Order 3 (`ORD-20261019-DEMO-003`) through confirmation (FIFO batch reservation) and final fulfillment (stock deduction and ledger entry).
-
-### Step 1: Inspect the Pending Order
-- **Endpoint:** `GET /api/orders/3`
-- **Click:** "Try it out" → `id: 3` → "Execute".
-- **Response:** `200 OK`
-```json
-{
-  "id": 3,
-  "orderNumber": "ORD-20261019-DEMO-003",
-  "customerName": "Katering Demo C",
-  "status": "Pending",
-  "totalAmount": 630000.00,
-  "completedAtUtc": null,
-  "items": [
-    { "id": 4, "productSku": "ABON-SAPI-ORI-100", "quantity": 10, "unitPrice": 35000.00, "lineTotal": 350000.00 },
-    { "id": 5, "productSku": "ABON-AYAM-GRH-100", "quantity": 10, "unitPrice": 28000.00, "lineTotal": 280000.00 }
-  ]
-}
-```
-*Note that no inventory is reserved yet.*
-
----
-
-### Step 2: Confirm Order & Reserve Stock (FIFO Allocation)
-- **Endpoint:** `POST /api/orders/3/confirm`
-- **Request Body:** `{}` (or leave default empty JSON object)
-- **Click:** "Execute".
-- **Response:** `200 OK`
-```json
-{
-  "id": 3,
-  "orderNumber": "ORD-20261019-DEMO-003",
-  "status": "Confirmed",
-  "confirmedAtUtc": "2026-10-22T...",
-  "completedAtUtc": null
-}
+# Install dependencies and launch Vite development server
+pnpm install   # or npm install
+pnpm dev       # or npm run dev
 ```
 
-#### What happened behind the scenes?
-1. The system evaluated eligible released batches using FIFO: `ProductionDate ASC, Id ASC`.
-2. For Sapi Original (10 units), `BAT-202610-SO02` was selected. `ReservedQuantity` increased from 0 to 10.
-3. For Ayam Gurih (10 units), `BAT-202610-AG01` was selected. `ReservedQuantity` increased from 0 to 10.
-4. Two active `OrderReservation` records were persisted.
-5. Physical stock (`QuantityOnHand`) was **not** decremented yet.
-
-You can verify the updated reservation status on Batch 5:
-- **Endpoint:** `GET /api/inventory/batches/5`
-- Result: `physicalQuantity: 60`, `reservedQuantity: 10`.
+The React frontend starts at `http://localhost:5173`.
+- Confirm the application is accessible by opening `http://localhost:5173` in your browser.
 
 ---
 
-### Step 3: Fulfill Order (Atomic Stock Deduction & Ledger Entry)
-- **Endpoint:** `POST /api/orders/3/fulfill`
-- **Request Body:** `{}`
-- **Click:** "Execute".
-- **Response:** `200 OK`
-```json
-{
-  "id": 3,
-  "orderNumber": "ORD-20261019-DEMO-003",
-  "status": "Completed",
-  "confirmedAtUtc": "2026-10-22T...",
-  "completedAtUtc": "2026-10-22T..."
-}
+## 2. Swagger UI JWT Authentication
+
+All business endpoints in AbonStock require an authenticated JWT Bearer token via ASP.NET Core `FallbackPolicy`. Calling any business endpoint without authenticating first will return `401 Unauthorized`.
+
+```text
+┌────────────────────────┐      ┌───────────────────────────┐      ┌─────────────────────────┐
+│ POST /api/auth/login   │ ───> │ Extract token from JSON   │ ───> │ Click "Authorize" lock  │
+│ (Submit credentials)   │      │ response                  │      │ Enter "Bearer <token>"  │
+└────────────────────────┘      └───────────────────────────┘      └─────────────────────────┘
 ```
 
-#### What happened behind the scenes?
-1. **Row Locks:** PostgreSQL row locks were acquired following the canonical sequence: `Order` → `Batches` → `Products`.
-2. **Stock Decrements:**
-   - `BAT-202610-SO02`: PhysicalQuantity decremented by 10; ReservedQuantity decremented by 10.
-   - `BAT-202610-AG01`: PhysicalQuantity decremented by 10 (now 50); ReservedQuantity decremented by 10 (now 0).
-3. **Product Stock:** Product 1 and Product 3 `QuantityOnHand` decremented by 10.
-4. **Reservations:** OrderReservations transitioned from `Active` to `Fulfilled`.
-5. **Ledger Records:** Two `OrderDeduction` records (`MovementType = 3`) were written to `StockMovements`.
+### 1. Authenticate via `POST /api/auth/login`
+1. Navigate to `http://localhost:5299/swagger`.
+2. Expand the `Auth` section and click `POST /api/auth/login`.
+3. Click **Try it out**.
+4. In the request body, provide your locally configured credentials:
+   ```json
+   {
+     "username": "admin",
+     "password": "<your_configured_password>"
+   }
+   ```
+   *(For Staff testing, replace `"admin"` with `"staff"`).*
+5. Click **Execute**.
+6. The response will return `200 OK` with a signed JWT token:
+   ```json
+   {
+     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+     "expiresIn": 28800,
+     "user": {
+       "id": "usr_admin",
+       "username": "admin",
+       "displayName": "Administrator",
+       "role": "Admin"
+     }
+   }
+   ```
+7. Copy the value of the `token` string (without quotes).
 
 ---
 
-### Step 4: Verify the Stock Movement Ledger
-- **Endpoint:** `GET /api/inventory/movements?orderId=3`
-- **Click:** "Execute".
-- **Response:** `200 OK`
-```json
-{
-  "items": [
-    {
-      "productId": 1,
-      "inventoryBatchId": 2,
-      "referenceOrderId": 3,
-      "movementType": "OrderDeduction",
-      "quantityChange": -10,
-      "reason": "Order ORD-20261019-DEMO-003 fulfillment"
-    },
-    {
-      "productId": 3,
-      "inventoryBatchId": 5,
-      "referenceOrderId": 3,
-      "movementType": "OrderDeduction",
-      "quantityChange": -10,
-      "reason": "Order ORD-20261019-DEMO-003 fulfillment"
-    }
-  ],
-  "totalCount": 2
-}
+### 2. Configure Swagger Bearer Authorization
+The Swagger security definition is configured as an API Key header:
+```csharp
+Name = "Authorization", In = ParameterLocation.Header
 ```
+Therefore, Swagger UI does **not** automatically prepend the word `Bearer`. You must provide the scheme manually:
+
+1. Scroll to the top of Swagger UI and click the green **Authorize** (lock icon) button.
+2. In the `Value:` input field, enter:
+   ```text
+   Bearer <paste_your_token_here>
+   ```
+   *(Example: `Bearer eyJhbGciOiJIUzI1Ni...` — ensure there is a space after `Bearer`).*
+3. Click **Authorize**, then click **Close**.
 
 ---
 
-## 4. Scenario B: Order Cancellation & Reservation Release
+### 3. Verify Authentication via `GET /api/auth/me`
+1. Expand `GET /api/auth/me`.
+2. Click **Try it out** $\rightarrow$ **Execute**.
+3. **Response:** `200 OK` returning your identity claims:
+   ```json
+   {
+     "id": "usr_admin",
+     "username": "admin",
+     "displayName": "Administrator",
+     "role": "Admin"
+   }
+   ```
 
-Demonstrates how cancelling a `Confirmed` order safely restores reserved inventory without stock leakage.
+---
 
-### Step 1: Create a New Order
-- **Endpoint:** `POST /api/orders`
+## 3. Administrator Demonstration Scenario
+
+This scenario demonstrates operations exclusive to the **`Admin`** role:
+
+### 1. Create a New Product (Admin Only)
+- **Endpoint:** `POST /api/products`
 - **Request Body:**
-```json
-{
-  "customerName": "Toko Oleh-Oleh Mandiri",
-  "customerEmail": "mandiri@example.com",
-  "items": [
-    {
-      "productId": 2,
-      "quantity": 5
-    }
-  ]
-}
-```
-- **Response:** `201 Created` with a new Order ID (e.g., ID `5`).
-
-### Step 2: Confirm the Order
-- **Endpoint:** `POST /api/orders/5/confirm`
-- **Response:** `200 OK` (Status: `Confirmed`).
-- Batch `BAT-202610-SP01` has its `ReservedQuantity` increased by 5.
-
-### Step 3: Cancel the Order
-- **Endpoint:** `POST /api/orders/5/cancel`
-- **Request Body:**
-```json
-{
-  "reason": "Customer cancelled due to delivery address change"
-}
-```
-- **Response:** `200 OK`
-```json
-{
-  "id": 5,
-  "status": "Cancelled",
-  "cancelledAtUtc": "2026-10-22T...",
-  "cancellationReason": "Customer cancelled due to delivery address change"
-}
-```
-- Active reservations are transitioned to `Released`, and batch `ReservedQuantity` is decremented by 5.
+  ```json
+  {
+    "sku": "ABON-SAPI-SPCL-100",
+    "name": "Abon Sapi Spesial 100g",
+    "description": "Premium shredded beef with caramelized shallots",
+    "unitPrice": 42000.00
+  }
+  ```
+- **Click:** **Execute**.
+- **Expected Response:** `201 Created` with initialized `version` token and `isActive: true`.
 
 ---
 
-## 5. Scenario C: Quality Control & Batch Release
+### 2. Update Product & Concurrency Token (Admin Only)
+- **Endpoint:** `PUT /api/products/{id}`
+- **Request Body:**
+  ```json
+  {
+    "name": "Abon Sapi Spesial 100g (Updated)",
+    "description": "Premium shredded beef with shallots and garlic",
+    "unitPrice": 45000.00,
+    "rowVersion": 1
+  }
+  ```
+- **Expected Response:** `200 OK` (or `409 Conflict` if the supplied `rowVersion` does not match PostgreSQL's current `xmin`).
 
-Demonstrates the 3-point QC gate before a newly received batch can be sold.
+---
 
-### Step 1: Receive a New Production Batch
+### 3. Perform Stock Adjustment (Admin Only)
+Physical stock corrections (such as shrinkage, damage, or audit variances) are restricted to Administrators:
+- **Endpoint:** `POST /api/inventory/adjustments`
+- **Request Body:**
+  ```json
+  {
+    "batchId": 2,
+    "quantityChange": -2,
+    "reason": "Damaged container during warehouse inspection",
+    "batchRowVersion": 1
+  }
+  ```
+- **Expected Response:** `200 OK` detailing `previousPhysicalQuantity` and `newPhysicalQuantity`, and generating an audit entry in the stock ledger.
+
+---
+
+### 4. Deactivate Product (Admin Only)
+- **Endpoint:** `PATCH /api/products/{id}/deactivate`
+- **Expected Response:** `200 OK` with `isActive: false`.
+
+---
+
+## 4. Warehouse Staff Demonstration Scenario
+
+This scenario demonstrates permitted operational workflows and proves that administrative actions are strictly rejected with `403 Forbidden`:
+
+### 1. Re-Authenticate as Staff
+1. Execute `POST /api/auth/login` with:
+   ```json
+   {
+     "username": "staff",
+     "password": "<your_configured_password>"
+   }
+   ```
+2. Copy the token from response.
+3. In Swagger Authorize, click **Logout**, then enter:
+   ```text
+   Bearer <paste_staff_token_here>
+   ```
+4. Call `GET /api/auth/me` to confirm identity: `role: "Staff"`.
+
+---
+
+### 2. Permitted Operational Workflows (Staff Allowed)
+Staff can perform all day-to-day warehouse receipt, inspection, and order fulfillment tasks:
+
+#### A. Receive Production Stock
 - **Endpoint:** `POST /api/inventory/receipts`
 - **Request Body:**
-```json
-{
-  "productId": 1,
-  "batchNo": "BAT-202610-SO99",
-  "productionDate": "2026-10-22",
-  "expiryDate": "2027-04-22",
-  "quantity": 50,
-  "reason": "Daily morning production run"
-}
-```
-- **Response:** `201 Created` (Batch Status: `PendingRelease`, Version: e.g. `6510`).
+  ```json
+  {
+    "productId": 1,
+    "batchNo": "BAT-202610-DEMO",
+    "productionDate": "2026-10-24",
+    "quantity": 50,
+    "reason": "Morning artisan production batch"
+  }
+  ```
+- **Expected Response:** `201 Created` (Batch initialized in `PendingRelease` status).
 
-### Step 2: Attempt Allocation Before Release (Expect Failure)
-A batch in `PendingRelease` cannot be reserved by any order. Only `Released` batches are selected by the FIFO query.
-
-### Step 3: Release Batch via Quality Control
-- **Endpoint:** `POST /api/inventory/batches/{newBatchId}/release`
+#### B. Perform 3-Point Quality Gate & Release
+- **Endpoint:** `POST /api/inventory/batches/{id}/release`
 - **Request Body:**
-```json
-{
-  "visualCheckPassed": true,
-  "aromaCheckPassed": true,
-  "packagingCheckPassed": true,
-  "rowVersion": 6510
-}
-```
-- **Response:** `200 OK` (Batch Status: `Released`). The batch is now ready for order allocation.
+  ```json
+  {
+    "visualCheckPassed": true,
+    "aromaCheckPassed": true,
+    "packagingCheckPassed": true,
+    "rowVersion": 1
+  }
+  ```
+- **Expected Response:** `200 OK` (Batch transitions to `Released` and becomes eligible for FEFO order allocation).
+
+#### C. Order Confirmation & FEFO Allocation
+- **Endpoint:** `POST /api/orders/{id}/confirm`
+- **Expected Response:** `200 OK` (Status transitions to `Confirmed`, reserving stock from oldest available released batches).
 
 ---
 
-## 6. Scenario D: Testing Validations & Conflict Responses
+### 3. Role-Based Access Enforcement (Staff Rejected)
+To prove that security is enforced by the backend and not merely hidden in the UI:
 
-Test how the API handles invalid operations, invariant violations, and concurrency conflicts:
+#### Attempt 1: Staff calls Create Product
+- **Endpoint:** `POST /api/products`
+- **Request Body:** `{ "sku": "STAFF-PROD", "name": "Illegal Product", "unitPrice": 10000 }`
+- **Expected Response:** `403 Forbidden`
+  ```json
+  {
+    "type": "https://tools.ietf.org/html/rfc9110#section-15.5.4",
+    "title": "Forbidden",
+    "status": 403
+  }
+  ```
 
-### 1. Attempting Double Fulfillment (HTTP 409 Conflict)
-- Try to fulfill an already `Completed` order (e.g., Order 1 or Order 3 after completing Scenario A).
-- **Endpoint:** `POST /api/orders/1/fulfill`
-- **Response:** `409 Conflict`
-```json
-{
-  "type": "about:blank",
-  "title": "Conflict",
-  "status": 409,
-  "detail": "Order 'ORD-20260915-DEMO-001' cannot be fulfilled because it is in status 'Completed'.",
-  "instance": "/api/orders/1/fulfill"
-}
-```
+#### Attempt 2: Staff calls Stock Adjustment
+- **Endpoint:** `POST /api/inventory/adjustments`
+- **Request Body:** `{ "batchId": 2, "quantityChange": -1, "reason": "Staff attempt", "batchRowVersion": 1 }`
+- **Expected Response:** `403 Forbidden`
 
----
-
-### 2. Attempting to Fulfill a Pending Order (HTTP 409 Conflict)
-- Create a new order (status `Pending`), then immediately attempt to call `fulfill`.
-- **Response:** `409 Conflict` (Orders must be `Confirmed` first).
+> **Key Takeaway:** The user's active session is **not** terminated on `403 Forbidden`. The user remains authenticated, but the specific operation is blocked.
 
 ---
 
-### 3. Exceeding Available Stock During Confirmation (HTTP 409 Conflict)
-- Create an order for a quantity exceeding available physical stock:
-```json
-{
-  "customerName": "Bulk Buyer",
-  "items": [{ "productId": 3, "quantity": 9999 }]
-}
-```
-- Call `POST /api/orders/{id}/confirm`.
-- **Response:** `409 Conflict`
-```json
-{
-  "title": "Conflict",
-  "status": 409,
-  "detail": "Insufficient available stock for product 'ABON-AYAM-GRH-100'. Requested: 9999, Available: 50."
-}
-```
+## 5. HTTP Response Status Code Reference
+
+| Status Code | Reason / Meaning | Example Trigger |
+| :---: | :--- | :--- |
+| `200 OK` | Request succeeded. | `GET /api/products`, `POST /api/orders/3/confirm` |
+| `201 Created` | New resource created. | `POST /api/products` (Admin), `POST /api/orders` |
+| `400 Bad Request` | Validation failure (RFC 7807). | Missing required fields, negative unit price, invalid QC checklist |
+| `401 Unauthorized` | Missing, invalid, or expired JWT token. | Calling business endpoint without Bearer token, wrong credentials |
+| `403 Forbidden` | Authenticated user lacks required role. | Staff calling `POST /api/products` or `POST /api/inventory/adjustments` |
+| `404 Not Found` | Target entity does not exist. | `GET /api/orders/99999` |
+| `409 Conflict` | Optimistic concurrency or business invariant conflict. | Stale `xmin` token, insufficient available stock, duplicate order fulfillment |
 
 ---
 
-### 4. Stale Optimistic Concurrency Token (HTTP 409 Concurrency Conflict)
-- Call `PUT /api/products/1` with an outdated `rowVersion` (e.g., `1`):
-```json
-{
-  "name": "Abon Sapi Original Stale",
-  "unitPrice": 36000.00,
-  "rowVersion": 1
-}
+## 6. Frontend Browser Walkthrough (React 18 + Vite)
+
+The React web client demonstrates how role-based authorization translates into a clean, modern user experience:
+
+```text
+Browser Flow:
+[/inventory (Anon)] ──> Redirect ──> [/login] ──> Enter Credentials ──> [/inventory (Restored)]
+                                                                               │
+                                                       ┌───────────────────────┴───────────────────────┐
+                                                       ▼                                               ▼
+                                                [ Admin Role ]                                  [ Staff Role ]
+                                         (Add/Edit/Adjust Buttons)                       (View Only / Hidden Controls)
 ```
-- **Response:** `409 Conflict`
-```json
-{
-  "title": "Concurrency Conflict",
-  "status": 409,
-  "detail": "The resource was modified by another operation. Please reload and retry."
-}
-```
+
+### 1. Anonymous Access & Protected Routes
+1. Open your browser in an incognito window and navigate directly to:
+   ```text
+   http://localhost:5173/inventory
+   ```
+2. **Observed Behavior:** The application displays `Verifying user session...` while checking local storage, detects no active session, and immediately navigates to `http://localhost:5173/login`.
+3. The destination URL (`/inventory`) is preserved in React Router navigation state.
 
 ---
 
-## 7. Summary of Expected State Transitions
+### 2. Administrator Login & UI Experience
+1. On the login card, enter your configured Admin credentials (`admin` / password).
+2. Click **Sign In**.
+3. **Observed Behavior:**
+   - The button shows a spinner and disables double-clicking during transit.
+   - Upon successful response, user is redirected to `/inventory`.
+   - The **Navbar** displays the user identity: `Administrator` with a blue `ADMIN` badge.
+   - On the **Products Page (`/products`)**:
+     - The **+ Add Product** button is visible and active in the header.
+     - Each product row has active **Edit** and **Deactivate** buttons.
+   - On the **Inventory Page (`/inventory`)**:
+     - The **+ Receive Stock** button is active.
+     - Batches with `Released` status have an active **Adjust** button.
 
-| Action | Order Status | Batch Physical Qty | Batch Reserved Qty | Product QuantityOnHand | StockMovement |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Create Order** | `Pending` | Unchanged | Unchanged | Unchanged | None |
-| **Confirm Order** | `Confirmed` | Unchanged | $+N$ | Unchanged | None |
-| **Fulfill Order** | `Completed` | $-N$ | $-N$ | $-N$ | `OrderDeduction (-N)` |
-| **Cancel Confirmed Order** | `Cancelled` | Unchanged | $-N$ | Unchanged | None |
-| **Receive Batch** | — | $+N$ (Pending) | $0$ | $+N$ | `Receipt (+N)` |
-| **Release Batch** | — | Unchanged (Released) | $0$ | Unchanged | None |
+---
+
+### 3. Session Restoration on Page Reload
+1. While logged in as Admin, press **F5** or click browser **Refresh**.
+2. **Observed Behavior:**
+   - The application briefly mounts `ProtectedRoute` with a verifying state.
+   - `AuthContext` retrieves the stored token from `sessionStorage` and validates it against `GET /api/auth/me`.
+   - The user remains logged in without being redirected to `/login`.
+
+---
+
+### 4. Staff Login & Role-Aware UI Comparison
+1. In the Navbar, click **Logout**.
+   - React state and `sessionStorage` are purged; browser navigates to `/login`.
+2. Login using Staff credentials (`staff` / password).
+3. **Observed Behavior:**
+   - The Navbar displays `Warehouse Staff` with a neutral `STAFF` badge.
+   - On the **Products Page (`/products`)**:
+     - The **+ Add Product** button is **hidden**.
+     - Table rows display a subtle **View only** label instead of Edit/Deactivate action buttons.
+   - On the **Inventory Page (`/inventory`)**:
+     - The **Adjust** button on Released batches is **hidden** and replaced by a neutral status label.
+     - Operational buttons (**Receive Stock** and **QC Release**) remain **fully active and accessible**.
+   - On the **Orders Page (`/orders`)**:
+     - Staff retains full operational capability to create, confirm, cancel, and fulfill orders.
+
+---
+
+### 5. Logout & Access Revocation
+1. Click **Logout** from the Navbar.
+2. Manually enter `http://localhost:5173/orders` in the browser address bar.
+3. **Observed Behavior:** Access is rejected; the browser immediately redirects to `/login`.
+
+---
+
+## 7. Troubleshooting Common Startup & Runtime Issues
+
+| Symptom / Error | Root Cause | Solution |
+| :--- | :--- | :--- |
+| **Backend crash:** `InvalidOperationException: Jwt:SecretKey must be configured...` | Missing or placeholder JWT signing key in configuration. | Set `$env:Jwt__SecretKey` in PowerShell or `export Jwt__SecretKey` in Bash with at least 32 characters. |
+| **Backend crash:** `Npgsql.NpgsqlException: Connection refused` | PostgreSQL container is stopped or port `5432` is not reachable. | Run `docker compose up -d` and check `docker ps` to verify the container is healthy. |
+| **Login returns `401 Unauthorized`:** `"Invalid username or password."` | Password for demo users (`admin`, `staff`) has not been supplied to the backend. | Set `$env:Auth__DefaultPassword` before starting the backend API. |
+| **Frontend displays network error toast:** `Unable to connect to backend at http://localhost:5299` | Backend Web API is not running or running on an unexpected port. | Confirm backend is running via `dotnet run` on port `5299` and accessible via curl or browser. |
+| **CORS error in browser console:** `Origin http://localhost:5173 is not allowed by Access-Control-Allow-Origin` | Frontend URL does not match backend allowed origins. | Check `appsettings.Development.json` to ensure `http://localhost:5173` is listed under `Cors:AllowedOrigins`. |
+| **HTTP `401 Unauthorized` on all Swagger endpoints** | Token was not supplied to Swagger Authorize dialog. | Execute `POST /api/auth/login`, copy the token, click Authorize in Swagger, and enter `Bearer <token>`. |
+| **HTTP `404 Not Found` on database tables** | EF Core migrations have not been applied to the PostgreSQL database. | Run `dotnet ef database update --project src/AbonStock.Api` from the repository root. |
