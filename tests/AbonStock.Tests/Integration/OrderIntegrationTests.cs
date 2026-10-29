@@ -320,7 +320,8 @@ public class OrderIntegrationTests(PostgresTestFixture fixture) : IClassFixture<
         BatchStatus status = BatchStatus.Released,
         DateOnly? productionDate = null,
         DateOnly? expiryDate = null,
-        int? initialQuantity = null)
+        int? initialQuantity = null,
+        bool explicitNullExpiry = false)
     {
         using var scope = _fixture.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AbonStockDbContext>();
@@ -331,7 +332,7 @@ public class OrderIntegrationTests(PostgresTestFixture fixture) : IClassFixture<
             ProductId = productId,
             BatchNo = $"BAT-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}",
             ProductionDate = productionDate ?? today,
-            ExpiryDate = expiryDate,
+            ExpiryDate = explicitNullExpiry ? null : (expiryDate ?? (productionDate ?? today).AddYears(1)),
             InitialQuantity = initialQuantity ?? Math.Max(1, physicalQuantity),
             PhysicalQuantity = physicalQuantity,
             ReservedQuantity = 0,
@@ -506,21 +507,20 @@ public class OrderIntegrationTests(PostgresTestFixture fixture) : IClassFixture<
     }
 
     [Fact]
-    public async Task ConfirmOrder_ExcludesExpiredBatches_AndIncludesBatchesWithNullOrFutureExpiry()
+    public async Task ConfirmOrder_ExcludesExpiredAndNullExpiryBatches_AllocatesOnlyEligibleFutureExpiryBatches()
     {
         var product = await CreateTestProductAsync(10.00m, isActive: true, "CONF-EXP");
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
 
         // Expired yesterday -> excluded
         var expiredBatch = await CreateTestBatchAsync(product.Id, 30, BatchStatus.Released, productionDate: today.AddDays(-20), expiryDate: today.AddDays(-1));
-        // Null expiry -> eligible
-        var nullExpiryBatch = await CreateTestBatchAsync(product.Id, 20, BatchStatus.Released, productionDate: today.AddDays(-10), expiryDate: null);
+        // Null expiry -> excluded under FEFO sales policy (cannot be automatically allocated)
+        var nullExpiryBatch = await CreateTestBatchAsync(product.Id, 20, BatchStatus.Released, productionDate: today.AddDays(-10), explicitNullExpiry: true);
         // Future expiry -> eligible
         var futureExpiryBatch = await CreateTestBatchAsync(product.Id, 20, BatchStatus.Released, productionDate: today.AddDays(-5), expiryDate: today.AddDays(15));
 
-        // Order requires 35 items.
-        // If expired batch was included, total = 70. Without it, total eligible = 40 (20 + 20).
-        var order = await CreateTestOrderAsync((product.Id, 35));
+        // Order requires 15 items (fits into the 20 available in futureExpiryBatch).
+        var order = await CreateTestOrderAsync((product.Id, 15));
 
         var confirmResp = await _client.PostAsJsonAsync($"/api/orders/{order.Id}/confirm", new ConfirmOrderRequest());
         Assert.Equal(HttpStatusCode.OK, confirmResp.StatusCode);
@@ -536,9 +536,56 @@ public class OrderIntegrationTests(PostgresTestFixture fixture) : IClassFixture<
         Assert.NotNull(dbNullExp);
         Assert.NotNull(dbFutureExp);
 
-        Assert.Equal(0, dbExpired.ReservedQuantity); // Untouched!
-        Assert.Equal(20, dbNullExp.ReservedQuantity); // 20 allocated from older null-expiry batch
-        Assert.Equal(15, dbFutureExp.ReservedQuantity); // Remaining 15 allocated from future-expiry batch
+        Assert.Equal(0, dbExpired.ReservedQuantity); // Untouched (expired)
+        Assert.Equal(0, dbNullExp.ReservedQuantity); // Untouched (null expiry excluded from order allocation)
+        Assert.Equal(15, dbFutureExp.ReservedQuantity); // 15 allocated from future-expiry batch
+
+        // Trying to order 10 more (total remaining eligible = 5) fails with 409 Conflict
+        var secondOrder = await CreateTestOrderAsync((product.Id, 10));
+        var secondResp = await _client.PostAsJsonAsync($"/api/orders/{secondOrder.Id}/confirm", new ConfirmOrderRequest());
+        Assert.Equal(HttpStatusCode.Conflict, secondResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task ConfirmOrder_WithFefoAllocation_AllocatesEarlierExpiryBeforeEarlierProductionDate()
+    {
+        var product = await CreateTestProductAsync(25.00m, isActive: true, "CONF-FEFO-ORD");
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+
+        // Batch A: Earlier production (Jan 2026), but later expiry (Jun 2027)
+        var batchA = await CreateTestBatchAsync(
+            product.Id,
+            20,
+            BatchStatus.Released,
+            productionDate: new DateOnly(2026, 1, 1),
+            expiryDate: new DateOnly(2027, 6, 1));
+
+        // Batch B: Later production (Feb 2026), but earlier expiry (Jan 2027)
+        var batchB = await CreateTestBatchAsync(
+            product.Id,
+            20,
+            BatchStatus.Released,
+            productionDate: new DateOnly(2026, 2, 1),
+            expiryDate: new DateOnly(2027, 1, 1));
+
+        // Order requires 25 units:
+        // Under FEFO: Batch B (earlier expiry) must be exhausted first (20 units),
+        // then Batch A takes remainder (5 units).
+        var order = await CreateTestOrderAsync((product.Id, 25));
+
+        var confirmResp = await _client.PostAsJsonAsync($"/api/orders/{order.Id}/confirm", new ConfirmOrderRequest { RowVersion = order.Version });
+        Assert.Equal(HttpStatusCode.OK, confirmResp.StatusCode);
+
+        using var scope = _fixture.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AbonStockDbContext>();
+
+        var dbBatchA = await db.InventoryBatches.AsNoTracking().FirstAsync(b => b.Id == batchA.Id);
+        var dbBatchB = await db.InventoryBatches.AsNoTracking().FirstAsync(b => b.Id == batchB.Id);
+
+        // FEFO Invariant: Batch B (earlier expiry) exhausted first
+        Assert.Equal(20, dbBatchB.ReservedQuantity);
+        // Batch A satisfies remaining 5
+        Assert.Equal(5, dbBatchA.ReservedQuantity);
     }
 
     [Fact]

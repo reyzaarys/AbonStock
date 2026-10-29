@@ -139,6 +139,177 @@ public class InventoryValidationTests
     }
 
     [Fact]
+    public void QuarantineBatchRequest_WithValidData_PassesValidation()
+    {
+        var request = new QuarantineBatchRequest
+        {
+            Reason = "Detected seal defect during random QC sampling",
+            Notes = "Referred to laboratory for microbial testing",
+            RowVersion = 12345u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void QuarantineBatchRequest_WithValidData_WithoutNotes_PassesValidation()
+    {
+        var request = new QuarantineBatchRequest
+        {
+            Reason = "Suspected moisture damage",
+            Notes = null,
+            RowVersion = 1u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void QuarantineBatchRequest_WithEmptyReason_FailsValidation()
+    {
+        var request = new QuarantineBatchRequest
+        {
+            Reason = "",
+            RowVersion = 1u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Contains(errors, e => e.MemberNames.Contains(nameof(QuarantineBatchRequest.Reason)));
+    }
+
+    [Fact]
+    public void QuarantineBatchRequest_WithReasonExceeding500Characters_FailsValidation()
+    {
+        var request = new QuarantineBatchRequest
+        {
+            Reason = new string('A', 501),
+            RowVersion = 1u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Contains(errors, e => e.MemberNames.Contains(nameof(QuarantineBatchRequest.Reason)));
+    }
+
+    [Fact]
+    public void QuarantineBatchRequest_WithMissingRowVersion_FailsValidation()
+    {
+        var request = new QuarantineBatchRequest
+        {
+            Reason = "Valid reason",
+            RowVersion = null
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Contains(errors, e => e.MemberNames.Contains(nameof(QuarantineBatchRequest.RowVersion)));
+    }
+
+    [Fact]
+    public void QuarantineBatchRequest_WithNotesExceeding500Characters_FailsValidation()
+    {
+        var request = new QuarantineBatchRequest
+        {
+            Reason = "Valid reason",
+            Notes = new string('N', 501),
+            RowVersion = 1u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Contains(errors, e => e.MemberNames.Contains(nameof(QuarantineBatchRequest.Notes)));
+    }
+
+    [Fact]
+    public void WriteOffBatchRequest_WithValidData_PassesValidation()
+    {
+        var request = new WriteOffBatchRequest
+        {
+            Quantity = 25,
+            Reason = "Pest damage during storage",
+            DisposalDocumentNumber = "DISP-202610-001",
+            BatchRowVersion = 100u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Empty(errors);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-10)]
+    public void WriteOffBatchRequest_WithZeroOrNegativeQuantity_FailsValidation(int invalidQuantity)
+    {
+        var request = new WriteOffBatchRequest
+        {
+            Quantity = invalidQuantity,
+            Reason = "Spoilage",
+            BatchRowVersion = 1u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Contains(errors, e => e.MemberNames.Contains(nameof(WriteOffBatchRequest.Quantity)));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void WriteOffBatchRequest_WithEmptyOrWhitespaceReason_FailsValidation(string invalidReason)
+    {
+        var request = new WriteOffBatchRequest
+        {
+            Quantity = 10,
+            Reason = invalidReason.Trim(), // StringLength handles empty
+            BatchRowVersion = 1u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Contains(errors, e => e.MemberNames.Contains(nameof(WriteOffBatchRequest.Reason)));
+    }
+
+    [Fact]
+    public void WriteOffBatchRequest_WithReasonExceeding500Characters_FailsValidation()
+    {
+        var request = new WriteOffBatchRequest
+        {
+            Quantity = 10,
+            Reason = new string('W', 501),
+            BatchRowVersion = 1u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Contains(errors, e => e.MemberNames.Contains(nameof(WriteOffBatchRequest.Reason)));
+    }
+
+    [Fact]
+    public void WriteOffBatchRequest_WithDisposalDocumentNumberExceeding100Characters_FailsValidation()
+    {
+        var request = new WriteOffBatchRequest
+        {
+            Quantity = 10,
+            Reason = "Valid reason",
+            DisposalDocumentNumber = new string('D', 101),
+            BatchRowVersion = 1u
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Contains(errors, e => e.MemberNames.Contains(nameof(WriteOffBatchRequest.DisposalDocumentNumber)));
+    }
+
+    [Fact]
+    public void WriteOffBatchRequest_WithMissingBatchRowVersion_FailsValidation()
+    {
+        var request = new WriteOffBatchRequest
+        {
+            Quantity = 10,
+            Reason = "Valid reason",
+            BatchRowVersion = null
+        };
+
+        var errors = ValidateModel(request);
+        Assert.Contains(errors, e => e.MemberNames.Contains(nameof(WriteOffBatchRequest.BatchRowVersion)));
+    }
+
+    [Fact]
     public void StockAdjustmentRequest_WithMissingBatchRowVersion_FailsValidation()
     {
         var request = new StockAdjustmentRequest

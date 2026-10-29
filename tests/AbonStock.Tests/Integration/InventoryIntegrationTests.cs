@@ -611,6 +611,173 @@ public class InventoryIntegrationTests(PostgresTestFixture fixture) : IClassFixt
     }
 
     [Fact]
+    public async Task AdjustStock_ConcurrentAdjustmentsOnDifferentBatches_WithoutProductRowVersion_SerializesSafelyWithoutLostUpdate()
+    {
+        var product = await CreateTestProductAsync("ADJ-NOLOST");
+
+        // Create Batch 1 (qty 50)
+        var rec1 = await _client.PostAsJsonAsync("/api/inventory/receipts", new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BATCH-NL1-{Guid.NewGuid().ToString("N")[..8]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            Quantity = 50
+        });
+        var b1Receipt = await rec1.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(b1Receipt);
+
+        // Create Batch 2 (qty 50)
+        var rec2 = await _client.PostAsJsonAsync("/api/inventory/receipts", new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BATCH-NL2-{Guid.NewGuid().ToString("N")[..8]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            Quantity = 50
+        });
+        var b2Receipt = await rec2.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(b2Receipt);
+
+        // Release Batch 1
+        var rel1 = await _client.PostAsJsonAsync($"/api/inventory/batches/{b1Receipt.BatchId}/release", new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = b1Receipt.BatchVersion
+        });
+        var b1Released = await rel1.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(b1Released);
+
+        // Release Batch 2
+        var rel2 = await _client.PostAsJsonAsync($"/api/inventory/batches/{b2Receipt.BatchId}/release", new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = b2Receipt.BatchVersion
+        });
+        var b2Released = await rel2.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(b2Released);
+
+        // Initial check: Product.QuantityOnHand = 100
+        var prodResp = await _client.GetAsync($"/api/products/{product.Id}");
+        var currentProduct = await prodResp.Content.ReadFromJsonAsync<ProductResponse>(JsonOptions);
+        Assert.NotNull(currentProduct);
+        Assert.Equal(100, currentProduct.QuantityOnHand);
+
+        // Fire 2 concurrent adjustments on DIFFERENT batches without passing ProductRowVersion!
+        // Thanks to row-level locking on Products FOR UPDATE, both must serialize and both succeed,
+        // eliminating the lost update anomaly on Product.QuantityOnHand.
+        var task1 = _client.PostAsJsonAsync("/api/inventory/adjustments", new StockAdjustmentRequest
+        {
+            BatchId = b1Released.Id,
+            QuantityChange = -15,
+            Reason = "P1 hotfix test: delta -15 on Batch 1",
+            BatchRowVersion = b1Released.Version,
+            ProductRowVersion = null // explicitly null to test pessimistic row-lock protection
+        });
+
+        var task2 = _client.PostAsJsonAsync("/api/inventory/adjustments", new StockAdjustmentRequest
+        {
+            BatchId = b2Released.Id,
+            QuantityChange = -10,
+            Reason = "P1 hotfix test: delta -10 on Batch 2",
+            BatchRowVersion = b2Released.Version,
+            ProductRowVersion = null // explicitly null to test pessimistic row-lock protection
+        });
+
+        var responses = await Task.WhenAll(task1, task2);
+
+        // Both adjustments should succeed with HTTP 200 OK
+        Assert.All(responses, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
+
+        // Re-query database to verify zero lost update:
+        // Batch 1: 50 - 15 = 35
+        // Batch 2: 50 - 10 = 40
+        // Product: exactly 75 (35 + 40)
+        var finalProdResp = await _client.GetAsync($"/api/products/{product.Id}");
+        var finalProduct = await finalProdResp.Content.ReadFromJsonAsync<ProductResponse>(JsonOptions);
+        Assert.NotNull(finalProduct);
+
+        var b1FinalResp = await _client.GetAsync($"/api/inventory/batches/{b1Released.Id}");
+        var b1Final = await b1FinalResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(b1Final);
+        Assert.Equal(35, b1Final.PhysicalQuantity);
+
+        var b2FinalResp = await _client.GetAsync($"/api/inventory/batches/{b2Released.Id}");
+        var b2Final = await b2FinalResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(b2Final);
+        Assert.Equal(40, b2Final.PhysicalQuantity);
+
+        // Invariant holds strictly: Product.QuantityOnHand == SUM(Batch.PhysicalQuantity)
+        Assert.Equal(75, finalProduct.QuantityOnHand);
+        Assert.Equal(finalProduct.QuantityOnHand, b1Final.PhysicalQuantity + b2Final.PhysicalQuantity);
+
+        // Also run Audit tool to verify consistency
+        var auditResp = await _client.GetAsync($"/api/inventory/audit?productId={product.Id}");
+        var audit = await auditResp.Content.ReadFromJsonAsync<InventoryAuditResponse>(JsonOptions);
+        Assert.NotNull(audit);
+        Assert.True(audit.IsSystemConsistent);
+        Assert.Equal(0, audit.InconsistentProductsCount);
+        Assert.Equal("Valid", audit.LedgerAudit.Status);
+    }
+
+    [Fact]
+    public async Task AdjustStock_ConcurrentAdjustmentsExceedingBatchStock_SafelyRejectsWithoutPartialMutation()
+    {
+        var product = await CreateTestProductAsync("ADJ-FAILROLL");
+
+        var rec = await _client.PostAsJsonAsync("/api/inventory/receipts", new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BATCH-FR-{Guid.NewGuid().ToString("N")[..8]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            Quantity = 30
+        });
+        var bReceipt = await rec.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(bReceipt);
+
+        var rel = await _client.PostAsJsonAsync($"/api/inventory/batches/{bReceipt.BatchId}/release", new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = bReceipt.BatchVersion
+        });
+        var bReleased = await rel.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(bReleased);
+
+        // Attempt adjustment with QuantityChange = -35 (exceeds physical quantity of 30)
+        var invalidReq = new StockAdjustmentRequest
+        {
+            BatchId = bReleased.Id,
+            QuantityChange = -35,
+            Reason = "Adjustment exceeding stock",
+            BatchRowVersion = bReleased.Version
+        };
+        var failResp = await _client.PostAsJsonAsync("/api/inventory/adjustments", invalidReq);
+        Assert.Equal(HttpStatusCode.Conflict, failResp.StatusCode);
+
+        // Verify rollback left ZERO partial changes on batch, product, or ledger
+        var finalProdResp = await _client.GetAsync($"/api/products/{product.Id}");
+        var finalProduct = await finalProdResp.Content.ReadFromJsonAsync<ProductResponse>(JsonOptions);
+        Assert.NotNull(finalProduct);
+        Assert.Equal(30, finalProduct.QuantityOnHand);
+
+        var bFinalResp = await _client.GetAsync($"/api/inventory/batches/{bReleased.Id}");
+        var bFinal = await bFinalResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(bFinal);
+        Assert.Equal(30, bFinal.PhysicalQuantity);
+
+        // Movements count for this batch must only be the 1 original receipt
+        var movResp = await _client.GetAsync($"/api/inventory/movements?batchId={bReleased.Id}");
+        var movements = await movResp.Content.ReadFromJsonAsync<PagedResult<StockMovementResponse>>(JsonOptions);
+        Assert.NotNull(movements);
+        Assert.Single(movements.Items);
+        Assert.Equal("Receipt", movements.Items[0].MovementType);
+    }
+
+    [Fact]
     public async Task AdjustStock_NegativeAdjustmentBelowReservedQuantity_ReturnsConflictProblemDetails()
     {
         var product = await CreateTestProductAsync("ADJ-RES");
@@ -623,6 +790,7 @@ public class InventoryIntegrationTests(PostgresTestFixture fixture) : IClassFixt
             ProductId = product.Id,
             BatchNo = batchNo,
             ProductionDate = prodDate,
+            ExpiryDate = prodDate.AddMonths(12),
             Quantity = 50,
             Reason = "Initial receipt for reserved adjustment test"
         };
@@ -854,4 +1022,901 @@ public class InventoryIntegrationTests(PostgresTestFixture fixture) : IClassFixt
         var pagedResult = await response.Content.ReadFromJsonAsync<PagedResult<BatchResponse>>(JsonOptions);
         Assert.NotNull(pagedResult);
     }
+
+    #region Quarantine Workflow Tests (Slice 1.2)
+
+    [Fact]
+    public async Task QuarantineBatch_PendingReleaseBatch_TransitionsToQuarantinedAndPreservesPhysicalStock()
+    {
+        var product = await CreateTestProductAsync("QRT-PEND");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-QRT-P-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 50,
+            Reason = "Initial receipt for quarantine test"
+        };
+
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        Assert.Equal(HttpStatusCode.Created, recResp.StatusCode);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+        Assert.Equal("PendingRelease", receipt.Status);
+
+        var qrtReq = new QuarantineBatchRequest
+        {
+            Reason = "Failed visual inspection due to packaging seal compromise",
+            Notes = "Sent sample to QC laboratory for validation",
+            RowVersion = receipt.BatchVersion
+        };
+
+        var qrtResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/quarantine", qrtReq);
+        Assert.Equal(HttpStatusCode.OK, qrtResp.StatusCode);
+        var quarantined = await qrtResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+
+        Assert.NotNull(quarantined);
+        Assert.Equal("Quarantined", quarantined.Status);
+        Assert.Equal(50, quarantined.PhysicalQuantity);
+        Assert.Equal(0, quarantined.ReservedQuantity);
+        Assert.Equal(50, quarantined.AvailableQuantity);
+        Assert.NotEqual(receipt.BatchVersion, quarantined.Version);
+
+        // Invariant: Product.QuantityOnHand is strictly preserved (items physically remain in warehouse)
+        var prodResp = await _client.GetAsync($"/api/products/{product.Id}");
+        var prod = await prodResp.Content.ReadFromJsonAsync<ProductResponse>(JsonOptions);
+        Assert.NotNull(prod);
+        Assert.Equal(50, prod.QuantityOnHand);
+
+        // Invariant: No ledger movement created (status change does not alter physical quantity)
+        var movResp = await _client.GetAsync($"/api/inventory/movements?batchId={receipt.BatchId}");
+        var movs = await movResp.Content.ReadFromJsonAsync<PagedResult<StockMovementResponse>>(JsonOptions);
+        Assert.NotNull(movs);
+        Assert.Single(movs.Items); // Only initial Receipt movement
+        Assert.Equal("Receipt", movs.Items[0].MovementType);
+    }
+
+    [Fact]
+    public async Task QuarantineBatch_ReleasedBatch_TransitionsToQuarantinedAndPreservesPhysicalStock()
+    {
+        var product = await CreateTestProductAsync("QRT-REL");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-QRT-R-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 60,
+            Reason = "Initial receipt"
+        };
+
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        var released = await relResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(released);
+        Assert.Equal("Released", released.Status);
+
+        // Quarantine the Released batch
+        var qrtReq = new QuarantineBatchRequest
+        {
+            Reason = "Customer reported off-flavor in sibling test sample",
+            RowVersion = released.Version
+        };
+
+        var qrtResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/quarantine", qrtReq);
+        Assert.Equal(HttpStatusCode.OK, qrtResp.StatusCode);
+        var quarantined = await qrtResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+
+        Assert.NotNull(quarantined);
+        Assert.Equal("Quarantined", quarantined.Status);
+        Assert.Equal(60, quarantined.PhysicalQuantity);
+        Assert.Equal(0, quarantined.ReservedQuantity);
+
+        // Product QuantityOnHand remains intact
+        var prodResp = await _client.GetAsync($"/api/products/{product.Id}");
+        var prod = await prodResp.Content.ReadFromJsonAsync<ProductResponse>(JsonOptions);
+        Assert.NotNull(prod);
+        Assert.Equal(60, prod.QuantityOnHand);
+    }
+
+    [Fact]
+    public async Task QuarantineBatch_WithActiveReservations_ReturnsConflict409AndDoesNotModifyOrder()
+    {
+        var product = await CreateTestProductAsync("QRT-RES");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-QRT-RES-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 40,
+            Reason = "Stock for order reservation test"
+        };
+
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        var released = await relResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(released);
+
+        // Create and Confirm Order for 25 units
+        var orderReq = new CreateOrderRequest
+        {
+            CustomerName = "Toko Abon Jaya",
+            CustomerEmail = "toko@example.com",
+            Items = [new CreateOrderItemRequest { ProductId = product.Id, Quantity = 25 }]
+        };
+        var orderResp = await _client.PostAsJsonAsync("/api/orders", orderReq);
+        Assert.Equal(HttpStatusCode.Created, orderResp.StatusCode);
+        var order = await orderResp.Content.ReadFromJsonAsync<OrderResponse>(JsonOptions);
+        Assert.NotNull(order);
+
+        var confirmResp = await _client.PostAsJsonAsync($"/api/orders/{order.Id}/confirm", new ConfirmOrderRequest { RowVersion = order.Version });
+        Assert.Equal(HttpStatusCode.OK, confirmResp.StatusCode);
+
+        // Verify batch has active reserved quantity
+        var batchResp = await _client.GetAsync($"/api/inventory/batches/{receipt.BatchId}");
+        var batchWithRes = await batchResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(batchWithRes);
+        Assert.Equal(25, batchWithRes.ReservedQuantity);
+
+        // Attempt quarantine on batch with active reservations -> must return 409 Conflict
+        var qrtReq = new QuarantineBatchRequest
+        {
+            Reason = "Attempt to quarantine reserved batch",
+            RowVersion = batchWithRes.Version
+        };
+        var qrtResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/quarantine", qrtReq);
+        Assert.Equal(HttpStatusCode.Conflict, qrtResp.StatusCode);
+        var problem = await qrtResp.Content.ReadFromJsonAsync<ProblemDetails>(JsonOptions);
+        Assert.NotNull(problem);
+        Assert.Contains("active reserved units", problem.Detail);
+
+        // Verify batch status is STILL Released and reservations remain intact
+        var batchAfterResp = await _client.GetAsync($"/api/inventory/batches/{receipt.BatchId}");
+        var batchAfter = await batchAfterResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(batchAfter);
+        Assert.Equal("Released", batchAfter.Status);
+        Assert.Equal(25, batchAfter.ReservedQuantity);
+
+        // Verify order status is STILL Confirmed (orders must not be cancelled automatically)
+        var orderAfterResp = await _client.GetAsync($"/api/orders/{order.Id}");
+        var orderAfter = await orderAfterResp.Content.ReadFromJsonAsync<OrderResponse>(JsonOptions);
+        Assert.NotNull(orderAfter);
+        Assert.Equal("Confirmed", orderAfter.Status);
+    }
+
+    [Fact]
+    public async Task QuarantineBatch_AlreadyQuarantinedBatch_ReturnsConflict409()
+    {
+        var product = await CreateTestProductAsync("QRT-ALR");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-QRT-ALR-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 30
+        };
+
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        // Quarantine batch
+        var qrtReq1 = new QuarantineBatchRequest
+        {
+            Reason = "Initial quarantine reason",
+            RowVersion = receipt.BatchVersion
+        };
+        var qrtResp1 = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/quarantine", qrtReq1);
+        Assert.Equal(HttpStatusCode.OK, qrtResp1.StatusCode);
+        var quarantined = await qrtResp1.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(quarantined);
+
+        // Re-quarantine already quarantined batch -> 409 Conflict
+        var qrtReq2 = new QuarantineBatchRequest
+        {
+            Reason = "Attempt duplicate quarantine",
+            RowVersion = quarantined.Version
+        };
+        var qrtResp2 = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/quarantine", qrtReq2);
+        Assert.Equal(HttpStatusCode.Conflict, qrtResp2.StatusCode);
+        var problem = await qrtResp2.Content.ReadFromJsonAsync<ProblemDetails>(JsonOptions);
+        Assert.NotNull(problem);
+        Assert.Contains("already quarantined", problem.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task QuarantineBatch_DepletedBatch_ReturnsConflict409()
+    {
+        var product = await CreateTestProductAsync("QRT-DEPL");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-QRT-DEPL-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 20
+        };
+
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        var released = await relResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(released);
+
+        // Deplete batch via stock adjustment
+        var zeroAdj = new StockAdjustmentRequest
+        {
+            BatchId = receipt.BatchId,
+            QuantityChange = -20,
+            Reason = "Deplete for test",
+            BatchRowVersion = released.Version
+        };
+        var zeroResp = await _client.PostAsJsonAsync("/api/inventory/adjustments", zeroAdj);
+        Assert.Equal(HttpStatusCode.OK, zeroResp.StatusCode);
+        var depleted = await zeroResp.Content.ReadFromJsonAsync<StockAdjustmentResponse>(JsonOptions);
+        Assert.NotNull(depleted);
+        Assert.Equal("Depleted", depleted.Status);
+
+        // Attempt quarantine on depleted batch -> 409 Conflict
+        var qrtReq = new QuarantineBatchRequest
+        {
+            Reason = "Attempt quarantine on depleted batch",
+            RowVersion = depleted.BatchVersion
+        };
+        var qrtResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/quarantine", qrtReq);
+        Assert.Equal(HttpStatusCode.Conflict, qrtResp.StatusCode);
+        var problem = await qrtResp.Content.ReadFromJsonAsync<ProblemDetails>(JsonOptions);
+        Assert.NotNull(problem);
+        Assert.Contains("cannot be quarantined", problem.Detail);
+    }
+
+    [Fact]
+    public async Task QuarantineBatch_WithStaleRowVersion_ReturnsConflict409Concurrency()
+    {
+        var product = await CreateTestProductAsync("QRT-STALE");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-QRT-STALE-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 35
+        };
+
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+        var staleVersion = receipt.BatchVersion;
+
+        // Release batch, causing Version to change
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        Assert.Equal(HttpStatusCode.OK, relResp.StatusCode);
+
+        // Attempt quarantine using stale initial version
+        var qrtReq = new QuarantineBatchRequest
+        {
+            Reason = "Quarantine with stale version",
+            RowVersion = staleVersion
+        };
+        var qrtResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/quarantine", qrtReq);
+        Assert.Equal(HttpStatusCode.Conflict, qrtResp.StatusCode);
+        var problem = await qrtResp.Content.ReadFromJsonAsync<ProblemDetails>(JsonOptions);
+        Assert.NotNull(problem);
+        Assert.Contains("modified by another operation", problem.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task QuarantineBatch_WithWhitespaceOrEmptyReason_ReturnsBadRequest400()
+    {
+        var qrtReq = new QuarantineBatchRequest
+        {
+            Reason = "   ",
+            RowVersion = 1u
+        };
+
+        var qrtResp = await _client.PostAsJsonAsync("/api/inventory/batches/1/quarantine", qrtReq);
+        Assert.Equal(HttpStatusCode.BadRequest, qrtResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task QuarantineBatch_WithNonExistentBatch_ReturnsNotFound404()
+    {
+        var qrtReq = new QuarantineBatchRequest
+        {
+            Reason = "Quarantine non-existent batch",
+            RowVersion = 1u
+        };
+
+        var qrtResp = await _client.PostAsJsonAsync("/api/inventory/batches/999999/quarantine", qrtReq);
+        Assert.Equal(HttpStatusCode.NotFound, qrtResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task QuarantineBatch_ConcurrentQuarantineAndOrderConfirmation_SerializesDeterministically()
+    {
+        var product = await CreateTestProductAsync("QRT-CONC");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-CONC-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(12)),
+            Quantity = 20
+        };
+
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        var released = await relResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(released);
+
+        // Prepare order for all 20 units
+        var orderReq = new CreateOrderRequest
+        {
+            CustomerName = "Concurrent Customer",
+            CustomerEmail = "conc@example.com",
+            Items = [new CreateOrderItemRequest { ProductId = product.Id, Quantity = 20 }]
+        };
+        var orderResp = await _client.PostAsJsonAsync("/api/orders", orderReq);
+        var order = await orderResp.Content.ReadFromJsonAsync<OrderResponse>(JsonOptions);
+        Assert.NotNull(order);
+
+        // Concurrent Task 1: Confirm Order (competes to reserve the 20 units)
+        // Concurrent Task 2: Quarantine Batch (competes to lock and quarantine)
+        var confirmTask = _client.PostAsJsonAsync($"/api/orders/{order.Id}/confirm", new ConfirmOrderRequest { RowVersion = order.Version });
+        var quarantineTask = _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/quarantine", new QuarantineBatchRequest
+        {
+            Reason = "Concurrent quarantine attempt",
+            RowVersion = released.Version
+        });
+
+        await Task.WhenAll(confirmTask, quarantineTask);
+
+        var confirmResult = await confirmTask;
+        var quarantineResult = await quarantineTask;
+
+        // One of the two must win:
+        // Scenario A: ConfirmOrder wins -> order is Confirmed, batch has ReservedQuantity = 20, quarantine gets 409 Conflict.
+        // Scenario B: Quarantine wins -> batch is Quarantined, confirm order gets 409 Conflict (insufficient sellable stock).
+        // Under NO circumstances can a batch be both Quarantined AND have active reservations!
+        var finalBatchResp = await _client.GetAsync($"/api/inventory/batches/{receipt.BatchId}");
+        var finalBatch = await finalBatchResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(finalBatch);
+
+        if (finalBatch.Status == "Quarantined")
+        {
+            // Quarantine won: reservations must be 0
+            Assert.Equal(0, finalBatch.ReservedQuantity);
+            Assert.Equal(HttpStatusCode.OK, quarantineResult.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, confirmResult.StatusCode);
+        }
+        else
+        {
+            // Confirm won: status must be Released, reserved quantity must be 20
+            Assert.Equal("Released", finalBatch.Status);
+            Assert.Equal(20, finalBatch.ReservedQuantity);
+            Assert.Equal(HttpStatusCode.OK, confirmResult.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, quarantineResult.StatusCode);
+        }
+    }
+
+    #endregion
+
+    #region Batch Write-Off Integration Tests
+
+    [Fact]
+    public async Task WriteOffBatch_QuarantinedBatch_PartialWriteOff_DeductsBatchAndProductAndRecordsLedger()
+    {
+        var product = await CreateTestProductAsync("WRO-QRT");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-WRO-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 100
+        };
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        // Quarantine the batch
+        var qrtReq = new QuarantineBatchRequest
+        {
+            Reason = "Suspected contamination during transit",
+            RowVersion = receipt.BatchVersion
+        };
+        var qrtResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/quarantine", qrtReq);
+        var quarantined = await qrtResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(quarantined);
+
+        // Partial write-off 30 units
+        var writeOffReq = new WriteOffBatchRequest
+        {
+            Quantity = 30,
+            Reason = "Pest contamination destruction",
+            DisposalDocumentNumber = "DISP-2026-001",
+            BatchRowVersion = quarantined.Version
+        };
+        var writeOffResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", writeOffReq);
+        Assert.Equal(HttpStatusCode.OK, writeOffResp.StatusCode);
+
+        var result = await writeOffResp.Content.ReadFromJsonAsync<WriteOffBatchResponse>(JsonOptions);
+        Assert.NotNull(result);
+        Assert.Equal(receipt.BatchId, result.BatchId);
+        Assert.Equal(product.Id, result.ProductId);
+        Assert.Equal(30, result.WrittenOffQuantity);
+        Assert.Equal(100, result.PreviousPhysicalQuantity);
+        Assert.Equal(70, result.NewPhysicalQuantity);
+        Assert.Equal(100, result.PreviousProductQuantityOnHand);
+        Assert.Equal(70, result.NewProductQuantityOnHand);
+        Assert.Equal("Quarantined", result.Status);
+
+        // Verify product QuantityOnHand in DB
+        var prodResp = await _client.GetAsync($"/api/products/{product.Id}");
+        var updatedProduct = await prodResp.Content.ReadFromJsonAsync<ProductResponse>(JsonOptions);
+        Assert.NotNull(updatedProduct);
+        Assert.Equal(70, updatedProduct.QuantityOnHand);
+
+        // Verify batch state in DB
+        var batchResp = await _client.GetAsync($"/api/inventory/batches/{receipt.BatchId}");
+        var updatedBatch = await batchResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(updatedBatch);
+        Assert.Equal(70, updatedBatch.PhysicalQuantity);
+        Assert.Equal(0, updatedBatch.ReservedQuantity);
+        Assert.Equal(70, updatedBatch.AvailableQuantity);
+        Assert.Equal("Quarantined", updatedBatch.Status);
+
+        // Verify StockMovement ledger entry
+        var movResp = await _client.GetAsync($"/api/inventory/movements?batchId={receipt.BatchId}");
+        var movements = await movResp.Content.ReadFromJsonAsync<PagedResult<StockMovementResponse>>(JsonOptions);
+        Assert.NotNull(movements);
+        var writeOffMov = movements.Items.FirstOrDefault(m => m.MovementType == "WriteOff");
+        Assert.NotNull(writeOffMov);
+        Assert.Equal(-30, writeOffMov.QuantityChange);
+        Assert.Equal(70, writeOffMov.BalanceAfter);
+        Assert.Equal(70, writeOffMov.BatchBalanceAfter);
+        Assert.Contains("DISP-2026-001", writeOffMov.Reason);
+        Assert.Contains("Pest contamination destruction", writeOffMov.Reason);
+        Assert.Contains("admin", writeOffMov.Reason);
+    }
+
+    [Fact]
+    public async Task WriteOffBatch_ReleasedBatch_PartialWriteOff_DeductsBatchAndProductAndRecordsLedger()
+    {
+        var product = await CreateTestProductAsync("WRO-REL");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-REL-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(12)),
+            Quantity = 60
+        };
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        var released = await relResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(released);
+
+        // Write off 20 units
+        var writeOffReq = new WriteOffBatchRequest
+        {
+            Quantity = 20,
+            Reason = "Water leakage damage on top pallet",
+            DisposalDocumentNumber = "DISP-2026-002",
+            BatchRowVersion = released.Version
+        };
+        var writeOffResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", writeOffReq);
+        Assert.Equal(HttpStatusCode.OK, writeOffResp.StatusCode);
+
+        var result = await writeOffResp.Content.ReadFromJsonAsync<WriteOffBatchResponse>(JsonOptions);
+        Assert.NotNull(result);
+        Assert.Equal(20, result.WrittenOffQuantity);
+        Assert.Equal(60, result.PreviousPhysicalQuantity);
+        Assert.Equal(40, result.NewPhysicalQuantity);
+        Assert.Equal(60, result.PreviousProductQuantityOnHand);
+        Assert.Equal(40, result.NewProductQuantityOnHand);
+        Assert.Equal("Released", result.Status);
+
+        // Verify batch state: AvailableQuantity should be 40 (Released with 0 reserved)
+        var batchResp = await _client.GetAsync($"/api/inventory/batches/{receipt.BatchId}");
+        var updatedBatch = await batchResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(updatedBatch);
+        Assert.Equal(40, updatedBatch.PhysicalQuantity);
+        Assert.Equal(40, updatedBatch.AvailableQuantity);
+        Assert.Equal("Released", updatedBatch.Status);
+    }
+
+    [Fact]
+    public async Task WriteOffBatch_FullWriteOff_ReducesPhysicalToZeroAndTransitionsToDepleted()
+    {
+        var product = await CreateTestProductAsync("WRO-FULL");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-FULL-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 45
+        };
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        var released = await relResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(released);
+
+        // Full write-off of 45 units
+        var writeOffReq = new WriteOffBatchRequest
+        {
+            Quantity = 45,
+            Reason = "Total batch spoilage after chiller failure",
+            DisposalDocumentNumber = "DISP-2026-003",
+            BatchRowVersion = released.Version
+        };
+        var writeOffResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", writeOffReq);
+        Assert.Equal(HttpStatusCode.OK, writeOffResp.StatusCode);
+
+        var result = await writeOffResp.Content.ReadFromJsonAsync<WriteOffBatchResponse>(JsonOptions);
+        Assert.NotNull(result);
+        Assert.Equal(45, result.WrittenOffQuantity);
+        Assert.Equal(0, result.NewPhysicalQuantity);
+        Assert.Equal("Depleted", result.Status);
+
+        // Verify batch state is Depleted and physical is 0
+        var batchResp = await _client.GetAsync($"/api/inventory/batches/{receipt.BatchId}");
+        var updatedBatch = await batchResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(updatedBatch);
+        Assert.Equal(0, updatedBatch.PhysicalQuantity);
+        Assert.Equal(0, updatedBatch.AvailableQuantity);
+        Assert.Equal("Depleted", updatedBatch.Status);
+
+        // Verify productOnHand is 0
+        var prodResp = await _client.GetAsync($"/api/products/{product.Id}");
+        var updatedProduct = await prodResp.Content.ReadFromJsonAsync<ProductResponse>(JsonOptions);
+        Assert.NotNull(updatedProduct);
+        Assert.Equal(0, updatedProduct.QuantityOnHand);
+    }
+
+    [Fact]
+    public async Task WriteOffBatch_PendingReleaseBatch_ReturnsConflict409()
+    {
+        var product = await CreateTestProductAsync("WRO-PND");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-PND-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 50
+        };
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        // Try to write off while batch is still PendingRelease
+        var writeOffReq = new WriteOffBatchRequest
+        {
+            Quantity = 10,
+            Reason = "Disposal attempt before inspection",
+            BatchRowVersion = receipt.BatchVersion
+        };
+        var writeOffResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", writeOffReq);
+        Assert.Equal(HttpStatusCode.Conflict, writeOffResp.StatusCode);
+
+        var problem = await writeOffResp.Content.ReadFromJsonAsync<ProblemDetails>(JsonOptions);
+        Assert.NotNull(problem);
+        Assert.Contains("PendingRelease", problem.Detail);
+    }
+
+    [Fact]
+    public async Task WriteOffBatch_DepletedBatch_ReturnsConflict409()
+    {
+        var product = await CreateTestProductAsync("WRO-DEP");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-DEP-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 20
+        };
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        var released = await relResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(released);
+
+        // Full write-off
+        var writeOffReq = new WriteOffBatchRequest
+        {
+            Quantity = 20,
+            Reason = "Full destruction",
+            BatchRowVersion = released.Version
+        };
+        var wResp1 = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", writeOffReq);
+        var writtenOff = await wResp1.Content.ReadFromJsonAsync<WriteOffBatchResponse>(JsonOptions);
+        Assert.NotNull(writtenOff);
+
+        // Try writing off again on Depleted batch
+        var secondWriteOff = new WriteOffBatchRequest
+        {
+            Quantity = 1,
+            Reason = "Invalid subsequent write-off",
+            BatchRowVersion = writtenOff.BatchVersion
+        };
+        var wResp2 = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", secondWriteOff);
+        Assert.Equal(HttpStatusCode.Conflict, wResp2.StatusCode);
+
+        var problem = await wResp2.Content.ReadFromJsonAsync<ProblemDetails>(JsonOptions);
+        Assert.NotNull(problem);
+        Assert.Contains("Depleted", problem.Detail);
+    }
+
+    [Fact]
+    public async Task WriteOffBatch_QuantityExceedingUnreservedStock_ReturnsConflict409()
+    {
+        var product = await CreateTestProductAsync("WRO-RES");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-RES-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(12)),
+            Quantity = 50
+        };
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        var released = await relResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(released);
+
+        // Reserve 30 units by confirming an order
+        var orderReq = new CreateOrderRequest
+        {
+            CustomerName = "Write-off Reservation Tester",
+            CustomerEmail = "test@example.com",
+            Items = [new CreateOrderItemRequest { ProductId = product.Id, Quantity = 30 }]
+        };
+        var orderResp = await _client.PostAsJsonAsync("/api/orders", orderReq);
+        var order = await orderResp.Content.ReadFromJsonAsync<OrderResponse>(JsonOptions);
+        Assert.NotNull(order);
+
+        var confResp = await _client.PostAsJsonAsync($"/api/orders/{order.Id}/confirm", new ConfirmOrderRequest { RowVersion = order.Version });
+        Assert.Equal(HttpStatusCode.OK, confResp.StatusCode);
+
+        // Current batch state: Physical = 50, Reserved = 30. Unreserved available for write-off = 20.
+        // Get fresh batch version after reservation
+        var batchFreshResp = await _client.GetAsync($"/api/inventory/batches/{receipt.BatchId}");
+        var freshBatch = await batchFreshResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(freshBatch);
+        Assert.Equal(30, freshBatch.ReservedQuantity);
+
+        // Attempting to write off 25 units (which exceeds 20 unreserved) must return 409 Conflict
+        var excessiveWriteOffReq = new WriteOffBatchRequest
+        {
+            Quantity = 25,
+            Reason = "Exceeds unreserved stock",
+            BatchRowVersion = freshBatch.Version
+        };
+        var failResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", excessiveWriteOffReq);
+        Assert.Equal(HttpStatusCode.Conflict, failResp.StatusCode);
+
+        var problem = await failResp.Content.ReadFromJsonAsync<ProblemDetails>(JsonOptions);
+        Assert.NotNull(problem);
+        Assert.Contains("exceeds available unreserved stock", problem.Detail, StringComparison.OrdinalIgnoreCase);
+
+        // Now write off exactly the 20 unreserved units -> Should succeed
+        var exactWriteOffReq = new WriteOffBatchRequest
+        {
+            Quantity = 20,
+            Reason = "Write-off exact unreserved remainder",
+            BatchRowVersion = freshBatch.Version
+        };
+        var succResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", exactWriteOffReq);
+        Assert.Equal(HttpStatusCode.OK, succResp.StatusCode);
+
+        var finalBatchResp = await _client.GetAsync($"/api/inventory/batches/{receipt.BatchId}");
+        var finalBatch = await finalBatchResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(finalBatch);
+        Assert.Equal(30, finalBatch.PhysicalQuantity);
+        Assert.Equal(30, finalBatch.ReservedQuantity);
+        Assert.Equal(0, finalBatch.AvailableQuantity);
+    }
+
+    [Fact]
+    public async Task WriteOffBatch_WithStaleBatchRowVersion_ReturnsConflict409Concurrency()
+    {
+        var product = await CreateTestProductAsync("WRO-STALE");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-STALE-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 50
+        };
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+        var staleVersion = receipt.BatchVersion;
+
+        // Release batch (version changes)
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        Assert.Equal(HttpStatusCode.OK, relResp.StatusCode);
+
+        // Attempt write-off using stale version
+        var writeOffReq = new WriteOffBatchRequest
+        {
+            Quantity = 10,
+            Reason = "Stale version test",
+            BatchRowVersion = staleVersion
+        };
+        var writeOffResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", writeOffReq);
+        Assert.Equal(HttpStatusCode.Conflict, writeOffResp.StatusCode);
+
+        var problem = await writeOffResp.Content.ReadFromJsonAsync<ProblemDetails>(JsonOptions);
+        Assert.NotNull(problem);
+        Assert.Contains("modified by another operation", problem.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task WriteOffBatch_ConcurrentWriteOffs_PreventsDoubleDeductionOrNegativeStock()
+    {
+        var product = await CreateTestProductAsync("WRO-CONC");
+        var receiptReq = new StockReceiptRequest
+        {
+            ProductId = product.Id,
+            BatchNo = $"BAT-WROCONC-{Guid.NewGuid().ToString("N")[..6]}",
+            ProductionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            ExpiryDate = DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(6)),
+            Quantity = 30
+        };
+        var recResp = await _client.PostAsJsonAsync("/api/inventory/receipts", receiptReq);
+        var receipt = await recResp.Content.ReadFromJsonAsync<StockReceiptResponse>(JsonOptions);
+        Assert.NotNull(receipt);
+
+        var relReq = new ReleaseBatchRequest
+        {
+            VisualCheckPassed = true,
+            AromaCheckPassed = true,
+            PackagingCheckPassed = true,
+            RowVersion = receipt.BatchVersion
+        };
+        var relResp = await _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/release", relReq);
+        var released = await relResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(released);
+
+        // Concurrently attempt two write-offs of 20 units each with the same released version
+        var task1 = _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", new WriteOffBatchRequest
+        {
+            Quantity = 20,
+            Reason = "Concurrent write-off A",
+            BatchRowVersion = released.Version
+        });
+        var task2 = _client.PostAsJsonAsync($"/api/inventory/batches/{receipt.BatchId}/write-off", new WriteOffBatchRequest
+        {
+            Quantity = 20,
+            Reason = "Concurrent write-off B",
+            BatchRowVersion = released.Version
+        });
+
+        await Task.WhenAll(task1, task2);
+
+        var res1 = await task1;
+        var res2 = await task2;
+
+        // Exactly one should succeed with 200 OK, and the other should fail with 409 Conflict (concurrency token mismatch)
+        var okCount = (res1.StatusCode == HttpStatusCode.OK ? 1 : 0) + (res2.StatusCode == HttpStatusCode.OK ? 1 : 0);
+        var conflictCount = (res1.StatusCode == HttpStatusCode.Conflict ? 1 : 0) + (res2.StatusCode == HttpStatusCode.Conflict ? 1 : 0);
+
+        Assert.Equal(1, okCount);
+        Assert.Equal(1, conflictCount);
+
+        // Verify remaining stock is exactly 10 units (30 - 20) and never negative
+        var finalBatchResp = await _client.GetAsync($"/api/inventory/batches/{receipt.BatchId}");
+        var finalBatch = await finalBatchResp.Content.ReadFromJsonAsync<BatchResponse>(JsonOptions);
+        Assert.NotNull(finalBatch);
+        Assert.Equal(10, finalBatch.PhysicalQuantity);
+        Assert.Equal(10, finalBatch.AvailableQuantity);
+        Assert.Equal("Released", finalBatch.Status);
+
+        var finalProdResp = await _client.GetAsync($"/api/products/{product.Id}");
+        var finalProd = await finalProdResp.Content.ReadFromJsonAsync<ProductResponse>(JsonOptions);
+        Assert.NotNull(finalProd);
+        Assert.Equal(10, finalProd.QuantityOnHand);
+    }
+
+    #endregion
 }

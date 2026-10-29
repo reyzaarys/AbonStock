@@ -36,6 +36,32 @@ public class InventoryController(IInventoryService inventoryService) : Controlle
         return Ok(response);
     }
 
+    [HttpPost("batches/{id:int}/quarantine")]
+    [ProducesResponseType(typeof(BatchResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> QuarantineBatch(int id, [FromBody] QuarantineBatchRequest request, CancellationToken ct)
+    {
+        var response = await _inventoryService.QuarantineBatchAsync(id, request, ct);
+        return Ok(response);
+    }
+
+    [Authorize(Roles = "Admin")]
+    [HttpPost("batches/{id:int}/write-off")]
+    [ProducesResponseType(typeof(WriteOffBatchResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> WriteOffBatch(int id, [FromBody] WriteOffBatchRequest request, CancellationToken ct)
+    {
+        var actor = User.Identity?.Name ?? User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value ?? "admin";
+        var response = await _inventoryService.WriteOffBatchAsync(id, request, actor, ct);
+        return Ok(response);
+    }
+
     [Authorize(Roles = "Admin")]
     [HttpPost("adjustments")]
     [ProducesResponseType(typeof(StockAdjustmentResponse), StatusCodes.Status200OK)]
@@ -73,6 +99,18 @@ public class InventoryController(IInventoryService inventoryService) : Controlle
     public async Task<IActionResult> GetMovements([FromQuery] StockMovementListQuery query, CancellationToken ct)
     {
         var response = await _inventoryService.GetMovementsAsync(query, ct);
+        return Ok(response);
+    }
+
+    [Authorize(Roles = "Admin")]
+    [HttpGet("audit")]
+    [ProducesResponseType(typeof(InventoryAuditResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> AuditInventory([FromQuery] int? productId, CancellationToken ct)
+    {
+        var response = await _inventoryService.AuditInventoryAsync(productId, ct);
         return Ok(response);
     }
 }

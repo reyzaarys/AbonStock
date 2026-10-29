@@ -74,7 +74,10 @@ public class RoleAuthorizationTests : IClassFixture<RoleAuthorizationTests.RoleA
     [InlineData("GET", "/api/inventory/batches")]
     [InlineData("POST", "/api/inventory/receipts")]
     [InlineData("POST", "/api/inventory/batches/1/release")]
+    [InlineData("POST", "/api/inventory/batches/1/quarantine")]
+    [InlineData("POST", "/api/inventory/batches/1/write-off")]
     [InlineData("POST", "/api/inventory/adjustments")]
+    [InlineData("GET", "/api/inventory/audit")]
     [InlineData("GET", "/api/orders")]
     [InlineData("POST", "/api/orders")]
     [InlineData("POST", "/api/orders/1/confirm")]
@@ -161,6 +164,33 @@ public class RoleAuthorizationTests : IClassFixture<RoleAuthorizationTests.RoleA
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
+    [Fact]
+    public async Task StaffRole_CannotCall_PostBatchWriteOff_ReturnsForbidden403()
+    {
+        using var client = CreateClientWithRole("Staff");
+
+        var payload = new WriteOffBatchRequest
+        {
+            Quantity = 10,
+            Reason = "Pest contamination write-off",
+            BatchRowVersion = 1
+        };
+
+        var response = await client.PostAsJsonAsync("/api/inventory/batches/1/write-off", payload);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task StaffRole_CannotCall_GetInventoryAudit_ReturnsForbidden403()
+    {
+        using var client = CreateClientWithRole("Staff");
+
+        var response = await client.GetAsync("/api/inventory/audit");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
     #endregion
 
     #region Allowed Access for Staff on Operational Endpoints
@@ -211,6 +241,15 @@ public class RoleAuthorizationTests : IClassFixture<RoleAuthorizationTests.RoleA
         };
         var releaseResp = await client.PostAsJsonAsync("/api/inventory/batches/1/release", releasePayload);
         Assert.Equal(HttpStatusCode.OK, releaseResp.StatusCode);
+
+        // POST quarantine batch
+        var quarantinePayload = new QuarantineBatchRequest
+        {
+            RowVersion = 1,
+            Reason = "Suspected moisture damage"
+        };
+        var quarantineResp = await client.PostAsJsonAsync("/api/inventory/batches/1/quarantine", quarantinePayload);
+        Assert.Equal(HttpStatusCode.OK, quarantineResp.StatusCode);
     }
 
     [Fact]
@@ -291,6 +330,21 @@ public class RoleAuthorizationTests : IClassFixture<RoleAuthorizationTests.RoleA
         };
         var adjustResp = await client.PostAsJsonAsync("/api/inventory/adjustments", adjustPayload);
         Assert.Equal(HttpStatusCode.OK, adjustResp.StatusCode);
+
+        // POST write-off
+        var writeOffPayload = new WriteOffBatchRequest
+        {
+            Quantity = 5,
+            Reason = "Admin approved disposal",
+            DisposalDocumentNumber = "DISP-202610-001",
+            BatchRowVersion = 1
+        };
+        var writeOffResp = await client.PostAsJsonAsync("/api/inventory/batches/1/write-off", writeOffPayload);
+        Assert.Equal(HttpStatusCode.OK, writeOffResp.StatusCode);
+
+        // GET inventory audit
+        var auditResp = await client.GetAsync("/api/inventory/audit");
+        Assert.Equal(HttpStatusCode.OK, auditResp.StatusCode);
     }
 
     [Fact]
@@ -306,6 +360,13 @@ public class RoleAuthorizationTests : IClassFixture<RoleAuthorizationTests.RoleA
 
         var ordersResp = await client.GetAsync("/api/orders");
         Assert.Equal(HttpStatusCode.OK, ordersResp.StatusCode);
+
+        var quarantineResp = await client.PostAsJsonAsync("/api/inventory/batches/1/quarantine", new QuarantineBatchRequest
+        {
+            RowVersion = 1,
+            Reason = "Admin quarantine check"
+        });
+        Assert.Equal(HttpStatusCode.OK, quarantineResp.StatusCode);
     }
 
     #endregion
@@ -354,6 +415,10 @@ public class RoleAuthorizationTests : IClassFixture<RoleAuthorizationTests.RoleA
             => Task.FromResult(new StockReceiptResponse(1, request.ProductId, request.BatchNo, request.ProductionDate, request.ExpiryDate, "LOC_01", request.Quantity, request.Quantity, "PendingRelease", 100, 1, 1, DateTime.UtcNow));
         public Task<BatchResponse> ReleaseBatchAsync(int batchId, ReleaseBatchRequest request, CancellationToken ct = default)
             => Task.FromResult(new BatchResponse(batchId, 1, "SKU-01", "Name", "BAT-01", DateOnly.FromDateTime(DateTime.UtcNow), null, "LOC_01", 100, 100, 0, 100, "Released", DateTime.UtcNow, DateTime.UtcNow, 2));
+        public Task<BatchResponse> QuarantineBatchAsync(int batchId, QuarantineBatchRequest request, CancellationToken ct = default)
+            => Task.FromResult(new BatchResponse(batchId, 1, "SKU-01", "Name", "BAT-01", DateOnly.FromDateTime(DateTime.UtcNow), null, "LOC_01", 100, 100, 0, 100, "Quarantined", DateTime.UtcNow, DateTime.UtcNow, 2));
+        public Task<WriteOffBatchResponse> WriteOffBatchAsync(int batchId, WriteOffBatchRequest request, string? actor = null, CancellationToken ct = default)
+            => Task.FromResult(new WriteOffBatchResponse(batchId, 1, "BAT-01", request.Quantity, 100, 100 - request.Quantity, 200, 200 - request.Quantity, "Quarantined", 1, 2, 2, DateTime.UtcNow));
         public Task<StockAdjustmentResponse> AdjustStockAsync(StockAdjustmentRequest request, CancellationToken ct = default)
             => Task.FromResult(new StockAdjustmentResponse(request.BatchId, 1, 100, 100 + request.QuantityChange, 200, 200 + request.QuantityChange, "Released", 2, 2, DateTime.UtcNow));
         public Task<PagedResult<BatchResponse>> GetBatchesAsync(BatchListQuery query, CancellationToken ct = default)
@@ -362,6 +427,14 @@ public class RoleAuthorizationTests : IClassFixture<RoleAuthorizationTests.RoleA
             => Task.FromResult(new BatchResponse(id, 1, "SKU-01", "Name", "BAT-01", DateOnly.FromDateTime(DateTime.UtcNow), null, "LOC_01", 100, 100, 0, 100, "Released", DateTime.UtcNow, DateTime.UtcNow, 1));
         public Task<PagedResult<StockMovementResponse>> GetMovementsAsync(StockMovementListQuery query, CancellationToken ct = default)
             => Task.FromResult(new PagedResult<StockMovementResponse>(Array.Empty<StockMovementResponse>(), 1, 20, 0));
+        public Task<InventoryAuditResponse> AuditInventoryAsync(int? productId = null, CancellationToken ct = default)
+            => Task.FromResult(new InventoryAuditResponse(
+                DateTime.UtcNow,
+                1, 1, 0,
+                Array.Empty<ProductDiscrepancyResponse>(),
+                Array.Empty<BatchInvariantViolationResponse>(),
+                new LedgerAuditResponse("Valid", 0, Array.Empty<string>(), Array.Empty<string>(), "Valid"),
+                true));
     }
 
     private class DummyOrderService : IOrderService

@@ -156,8 +156,8 @@ public class OrderService(AbonStockDbContext dbContext) : IOrderService
             // Acquire row-level lock on the order row first to serialize concurrent confirmation/cancellation requests.
             // Lock Hierarchy / Order:
             // 1. Orders table: SELECT "Id" FROM "Orders" WHERE "Id" = {id} FOR UPDATE
-            // 2. InventoryBatches table: candidate batches locked via FOR UPDATE with deterministic ordering (ProductionDate ASC, Id ASC)
-            // Both ConfirmAsync and CancelAsync strictly follow this Order -> Batch hierarchy, preventing cross-resource deadlocks.
+            // 2. InventoryBatches table: candidate batches locked via FOR UPDATE in canonical primary key order (Id ASC)
+            // ConfirmAsync, CancelAsync, and FulfillAsync strictly follow this Order -> Batch hierarchy, preventing cross-resource deadlocks.
             await _dbContext.Database.ExecuteSqlInterpolatedAsync(
                 $"SELECT \"Id\" FROM \"Orders\" WHERE \"Id\" = {id} FOR UPDATE", ct);
 
@@ -210,14 +210,18 @@ public class OrderService(AbonStockDbContext dbContext) : IOrderService
 
             foreach (var item in sortedItems)
             {
+                // Step 1: Acquire row-level locks on candidate batches in canonical primary key order (Id ASC)
+                // Candidate filter strictly enforces: Released status, positive available quantity,
+                // non-null ExpiryDate, and ExpiryDate >= today (FEFO sales policy).
                 var eligibleBatches = await _dbContext.InventoryBatches
                     .FromSqlInterpolated($@"
                         SELECT *, ""xmin"" FROM ""InventoryBatches""
                         WHERE ""ProductId"" = {item.ProductId}
                           AND ""Status"" = {(int)BatchStatus.Released}
                           AND ""PhysicalQuantity"" > ""ReservedQuantity""
-                          AND (""ExpiryDate"" IS NULL OR ""ExpiryDate"" >= {today})
-                        ORDER BY ""ProductionDate"" ASC, ""Id"" ASC
+                          AND ""ExpiryDate"" IS NOT NULL
+                          AND ""ExpiryDate"" >= {today}
+                        ORDER BY ""Id"" ASC
                         FOR UPDATE")
                     .ToListAsync(ct);
 
@@ -228,8 +232,12 @@ public class OrderService(AbonStockDbContext dbContext) : IOrderService
                         $"Insufficient available stock for product '{item.ProductSku}'. Requested: {item.Quantity}, Available: {totalAvailable}.");
                 }
 
+                // Step 2: FEFO Logical Allocation
+                // Sort batches by ExpiryDate ASC, then ProductionDate ASC, then Id ASC
+                var fefoBatches = FefoAllocationHelper.SelectAndOrderEligibleBatches(eligibleBatches, today);
+
                 int remaining = item.Quantity;
-                foreach (var batch in eligibleBatches)
+                foreach (var batch in fefoBatches)
                 {
                     if (remaining <= 0) break;
 
@@ -304,7 +312,7 @@ public class OrderService(AbonStockDbContext dbContext) : IOrderService
             // Acquire row-level lock on the order row first to serialize concurrent cancellation/confirmation requests.
             // Lock Hierarchy / Order:
             // 1. Orders table: SELECT "Id" FROM "Orders" WHERE "Id" = {id} FOR UPDATE
-            // 2. InventoryBatches table: candidate batches locked via FOR UPDATE with deterministic ordering (ProductionDate ASC, Id ASC)
+            // 2. InventoryBatches table: candidate batches locked via FOR UPDATE in canonical primary key order (Id ASC)
             // ConfirmAsync, CancelAsync, and FulfillAsync strictly follow this canonical Order -> Batch hierarchy, preventing cross-resource deadlocks.
             await _dbContext.Database.ExecuteSqlInterpolatedAsync(
                 $"SELECT \"Id\" FROM \"Orders\" WHERE \"Id\" = {id} FOR UPDATE", ct);
@@ -337,17 +345,18 @@ public class OrderService(AbonStockDbContext dbContext) : IOrderService
 
                 if (activeReservations.Count > 0)
                 {
-                    // Order batch rows deterministically (ProductionDate ASC, Id ASC) matching ConfirmAsync canonical lock order
+                    // Order batch rows deterministically by Id ASC matching canonical row-lock order
                     var batchIds = activeReservations
                         .Select(r => r.InventoryBatchId)
                         .Distinct()
+                        .OrderBy(id => id)
                         .ToArray();
 
                     var batches = await _dbContext.InventoryBatches
                         .FromSqlInterpolated($@"
                             SELECT *, ""xmin"" FROM ""InventoryBatches""
                             WHERE ""Id"" = ANY({batchIds})
-                            ORDER BY ""ProductionDate"" ASC, ""Id"" ASC
+                            ORDER BY ""Id"" ASC
                             FOR UPDATE")
                         .ToListAsync(ct);
 
@@ -414,7 +423,7 @@ public class OrderService(AbonStockDbContext dbContext) : IOrderService
             // Acquire row-level lock on the order row first to serialize concurrent fulfillment/cancellation requests.
             // Lock Hierarchy / Order:
             // 1. Orders table: SELECT "Id" FROM "Orders" WHERE "Id" = {id} FOR UPDATE
-            // 2. InventoryBatches table: candidate batches locked via FOR UPDATE with deterministic ordering (ProductionDate ASC, Id ASC)
+            // 2. InventoryBatches table: candidate batches locked via FOR UPDATE in canonical primary key order (Id ASC)
             // 3. Products table: associated products locked via FOR UPDATE with deterministic ordering (Id ASC)
             // ConfirmAsync, CancelAsync, and FulfillAsync strictly follow this canonical Order -> Batch -> Product hierarchy, preventing cross-resource deadlocks.
             await _dbContext.Database.ExecuteSqlInterpolatedAsync(
@@ -485,17 +494,18 @@ public class OrderService(AbonStockDbContext dbContext) : IOrderService
                 }
             }
 
-            // 5. Lock batches deterministically by ProductionDate ASC, Id ASC (Lock Hierarchy step 2, matching ConfirmAsync canonical lock order)
+            // 5. Lock batches deterministically by Id ASC (Lock Hierarchy step 2, matching canonical row-lock order)
             var batchIds = activeReservations
                 .Select(r => r.InventoryBatchId)
                 .Distinct()
+                .OrderBy(id => id)
                 .ToArray();
 
             var batches = await _dbContext.InventoryBatches
                 .FromSqlInterpolated($@"
                     SELECT *, ""xmin"" FROM ""InventoryBatches""
                     WHERE ""Id"" = ANY({batchIds})
-                    ORDER BY ""ProductionDate"" ASC, ""Id"" ASC
+                    ORDER BY ""Id"" ASC
                     FOR UPDATE")
                 .ToListAsync(ct);
 
@@ -588,8 +598,8 @@ public class OrderService(AbonStockDbContext dbContext) : IOrderService
             var now = DateTime.UtcNow;
             var runningProductBalances = products.ToDictionary(p => p.Id, p => p.QuantityOnHand);
 
-            // Deduct from batches and record StockMovement per batch
-            foreach (var batch in batches.OrderBy(b => b.ProductionDate).ThenBy(b => b.Id))
+            // Deduct from batches and record StockMovement per batch (in FEFO order)
+            foreach (var batch in batches.OrderBy(b => b.ExpiryDate).ThenBy(b => b.ProductionDate).ThenBy(b => b.Id))
             {
                 int batchDeductQty = requiredPerBatch[batch.Id];
 

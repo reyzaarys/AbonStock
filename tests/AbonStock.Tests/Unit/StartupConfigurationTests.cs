@@ -165,6 +165,36 @@ public class StartupConfigurationTests
         Assert.Equal("http://localhost:5173", response.Headers.GetValues("Access-Control-Allow-Origin").First());
     }
 
+    [Fact]
+    public void PostgresTestFixture_ValidateTestDatabase_RejectsDevDatabaseWithCriticalSafetyViolation()
+    {
+        var devConnStr = "Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=pass";
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Integration.PostgresTestFixture.ValidateTestDatabase(devConnStr));
+
+        Assert.Contains("CRITICAL SAFETY VIOLATION", ex.Message);
+        Assert.Contains("abonstock_db", ex.Message);
+    }
+
+    [Fact]
+    public void PostgresTestFixture_ValidateTestDatabase_RejectsNonTestDatabase()
+    {
+        var otherConnStr = "Host=localhost;Port=5432;Database=other_production_db;Username=abonstock;Password=pass";
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Integration.PostgresTestFixture.ValidateTestDatabase(otherConnStr));
+
+        Assert.Contains("SAFETY GUARD", ex.Message);
+        Assert.Contains("abonstock_test_db", ex.Message);
+    }
+
+    [Fact]
+    public void PostgresTestFixture_ValidateTestDatabase_AllowsTestDatabase()
+    {
+        var validConnStr = "Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=pass";
+        // Should execute successfully without throwing
+        Integration.PostgresTestFixture.ValidateTestDatabase(validConnStr);
+    }
+
     private static void RemoveAndReplaceServices(IServiceCollection services)
     {
         var descriptor = services.SingleOrDefault(d => d.ServiceType == typeof(IProductService));
