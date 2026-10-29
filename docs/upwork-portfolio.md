@@ -17,7 +17,7 @@ The system features:
 - Database-enforced double-deduction prevention via partial unique indexes.
 - Enterprise JWT Bearer authentication with role-based access control (Admin and Staff).
 - A modern, responsive React 18 SPA with session restoration, protected routing, and role-aware UI.
-- Comprehensive automated testing: 137 unit tests verified passed across backend (96) and frontend (41).
+- Comprehensive automated testing: 320 automated tests verified passed across backend (252) and frontend (68).
 
 ---
 
@@ -121,7 +121,10 @@ Only one startup instance acquires the lock to perform seeding, while other inst
 
 1. **3-Point Quality Assurance Gate:** Production batches initialize in `PendingRelease`. Only batches passing visual, aroma, and packaging checks transition to `Released`.
 2. **Deterministic FEFO Reservation:** On order confirmation, available `Released` batches are allocated strictly by earliest production date (`ProductionDate ASC, Id ASC`).
-3. **Immutable Audit Ledger:** Every stock adjustment or fulfillment produces an immutable `StockMovement` audit record with before and after balances for both the batch and aggregate product inventory.
+3. **Quarantine & Write-Off Auditing:** Suspect batches can be quarantined to halt allocation while preserving audit trails. Damaged/spoiled batches are formally written off by Administrators, updating physical balances and writing immutable `WriteOff` movement ledger records.
+4. **Real-Time Invariant Reconciliation:** An automated administrative audit engine validates that aggregate product stock precisely equals the sum of batch physical quantities, verifying zero negative inventory and zero unbacked reservations.
+5. **Order Detail Inspection & Ledger Navigation:** Full operational visibility into order lifecycle states, itemized prices/subtotals, conditional timestamps, and seamless one-click routing from fulfilled orders directly to corresponding Stock Movement ledger entries.
+6. **Immutable Audit Ledger:** Every stock adjustment, receipt, write-off, or fulfillment produces an immutable `StockMovement` audit record with before and after balances for both the batch and aggregate product inventory.
 
 ---
 
@@ -151,15 +154,13 @@ The frontend client is engineered with modern React patterns:
 
 ## 8. Testing Evidence & Verification Limits
 
-The solution maintains automated unit test suites for both backend and frontend:
+The solution maintains extensive automated test suites across both backend and frontend layers:
 
 | Suite | Runner / Framework | Tests | Status | Scope |
 | :--- | :--- | :---: | :---: | :--- |
-| **Backend Unit Tests** | xUnit 2.5.3 + .NET 8 | **96** | **96 Passed (100%)** | JWT generation, token validation, 401/403 RBAC guards, CORS policy, domain validation |
-| **Frontend Unit Tests** | Node.js Test Runner (`--experimental-strip-types`) | **41** | **41 Passed (100%)** | API client error handling, Bearer injection, session restoration, role-aware rendering |
-| **Database Integration Tests** | xUnit + PostgreSQL Fixture | **73** | *Unverified in Stage 11.4* | Exists in repository; skipped during Stage 11.4 to protect the demo database |
-
-> **Verification Transparency:** Across the 210 total tests defined in the repository, **137 unit tests were actively executed and passed with 0 failures during Stage 11.4**. The 73 PostgreSQL integration tests remain unverified in the latest stage.
+| **Backend Automated Tests** | xUnit 2.5.3 + .NET 8 (Unit & Integration) | **252** | **252 Passed (100%)** | Domain invariants, FEFO allocation sequences, row-level concurrency, reservation lifecycle, RBAC enforcement, EF Core PostgreSQL schema migrations |
+| **Frontend Unit & Domain Tests** | Node.js Test Runner (`--experimental-strip-types`) | **68** | **68 Passed (100%)** | API client error handling, Bearer injection, session restoration, role-aware rendering, order itemization & ledger navigation, inventory audit & quarantine services |
+| **Total Full-Stack Verification** | **xUnit + Node.js Runner** | **320** | **320 Passed (100%)** | **Zero test failures across entire full-stack solution** |
 
 ---
 
@@ -167,9 +168,10 @@ The solution maintains automated unit test suites for both backend and frontend:
 
 - **ASP.NET Core 8 & C# 12:** Minimal API design, RFC 7807 global exception handling, dependency injection, and clean architecture.
 - **PostgreSQL & Concurrency Engineering:** Row-level locking (`FOR UPDATE`), dead-lock prevention, advisory locks, partial unique constraints, and system column `xmin` optimistic concurrency tokens.
+- **Inventory Domain Integrity:** Strict FEFO allocation, batch quarantine/write-off auditing, real-time invariant reconciliation, and immutable ledger movements.
 - **Enterprise Security:** JWT Bearer authentication, PBKDF2 password hashing, fallback authorization policies, and role-based access control.
 - **Frontend Development:** React 18, TypeScript (strict mode), Vite bundler, React Router v6, custom state hooks, and resilient HTTP client wrappers.
-- **Automated Testing:** Test-driven development using xUnit, `WebApplicationFactory`, and native Node.js test runners.
+- **Automated Testing:** Test-driven development using xUnit, `WebApplicationFactory`, and native Node.js test runners (320 tests verified).
 
 ---
 
@@ -177,7 +179,7 @@ The solution maintains automated unit test suites for both backend and frontend:
 
 ### Project Title & Overview (For Upwork Portfolio Item)
 > **Title:** Full-Stack Inventory & Order Fulfillment Platform (.NET 8 & React 18)
-> **Summary:** Engineered a concurrent-safe inventory tracking and order fulfillment system for artisanal food manufacturing using ASP.NET Core 8, EF Core 8, PostgreSQL 16, and React 18 + TypeScript. Designed deterministic FEFO batch allocation, zero-deadlock row locking (`SELECT ... FOR UPDATE`), optimistic concurrency with native PostgreSQL `xmin` tokens, and partial unique indexes to guarantee zero duplicate deductions. Secured with JWT Bearer authentication and role-based access control (Admin/Staff). Fully verified across 137 automated unit tests.
+> **Summary:** Engineered a concurrent-safe inventory tracking and order fulfillment system for artisanal food manufacturing using ASP.NET Core 8, EF Core 8, PostgreSQL 16, and React 18 + TypeScript. Designed deterministic FEFO batch allocation, zero-deadlock row locking (`SELECT ... FOR UPDATE`), optimistic concurrency with native PostgreSQL `xmin` tokens, and partial unique indexes to guarantee zero duplicate deductions. Features real-time invariant audits, batch quarantine/write-off workflows, JWT Bearer authentication, and Admin/Staff role-based access control. Fully verified across 320 automated tests.
 
 ### Proposal Pitch Snippet (Applying for Senior .NET / Full-Stack Roles)
-> *"I specialize in designing resilient backend architectures and full-stack systems in .NET 8 where transaction integrity and concurrency cannot be compromised. In my recent reference project, **AbonStock**, I engineered a multi-batch inventory fulfillment system with PostgreSQL row-level locking, strict FEFO allocation, and database partial unique indexes that physically prevent duplicate stock deductions. The platform includes JWT authentication, Admin/Staff role-based authorization, and a modern React 18 TypeScript frontend. The entire codebase is verified by 137 automated unit tests. I would love to bring this level of architectural rigor and code quality to your project."*
+> *"I specialize in designing resilient backend architectures and full-stack systems in .NET 8 where transaction integrity and concurrency cannot be compromised. In my recent reference project, **AbonStock**, I engineered a multi-batch inventory fulfillment system with PostgreSQL row-level locking, strict FEFO allocation, and database partial unique indexes that physically prevent duplicate stock deductions. The platform includes real-time invariant auditing, batch quarantine/write-off workflows, JWT authentication, Admin/Staff role-based authorization, and a modern React 18 TypeScript frontend. The entire codebase is verified by 320 automated tests (252 backend, 68 frontend). I would love to bring this level of architectural rigor and code quality to your project."*

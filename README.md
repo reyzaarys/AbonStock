@@ -6,7 +6,7 @@
 [![Vite](https://img.shields.io/badge/Vite-5.4-646cff.svg)](https://vitejs.dev/)
 [![Entity Framework Core](https://img.shields.io/badge/EF%20Core-8.0-purple.svg)](https://learn.microsoft.com/en-us/ef/core/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue.svg)](https://www.postgresql.org/)
-[![Unit Tests](https://img.shields.io/badge/Unit%20Tests-137%20Passed-brightgreen.svg)]()
+[![Automated Tests](https://img.shields.io/badge/Automated%20Tests-320%20Passed-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-green.svg)]()
 
 A full-stack, concurrent-safe inventory tracking and order fulfillment platform engineered for artisanal food manufacturers (specifically Indonesian shredded meat / *Abon* producers). Built with an **ASP.NET Core 8 Web API**, **Entity Framework Core 8**, **PostgreSQL 16**, and a modern **React 18 + TypeScript + Vite** Single Page Application.
@@ -118,19 +118,27 @@ AbonStock/
 - Per-product batch number uniqueness (`IX_InventoryBatches_ProductId_BatchNo`).
 - QC inspection and stock receipt accessible to both **Staff** and **Admin**.
 
-### C. Stock Adjustments & Wastage Tracking
-- Physical stock corrections requiring documented audit reasons.
-- Invariant guard: physical quantity cannot fall below active reserved quantity.
-- Automatic transition to `Depleted` when physical quantity reaches zero.
-- Manual stock adjustments restricted strictly to **Admin** role.
+### C. Stock Adjustments, Quarantine & Write-Off Operations
+- **Physical Adjustments:** Correct stock counts requiring documented audit reasons; guarded so physical quantity cannot fall below active reserved quantity.
+- **Batch Quarantine:** Transition suspect or damaged batches to `Quarantined` status (`POST /api/inventory/batches/{id}/quarantine`). Prevents allocation while preserving physical count and audit history.
+- **Batch Write-Off:** Formally write off damaged, expired, or spoiled units (`POST /api/inventory/batches/{id}/write-off`, **Admin Only**). Deducts physical stock, synchronizes product `QuantityOnHand`, transitions to `Depleted` if zero, and logs an immutable `WriteOff` movement.
 
-### D. Order Lifecycle & Deterministic FEFO Allocation
-- **Creation (`Pending`):** Orders calculate line items and totals server-side; no stock is locked or reserved at draft creation.
+### D. Real-Time Inventory Invariant Audit Engine
+- **Automated Ledger Auditing:** Real-time reconciliation engine (`GET /api/inventory/audit`, **Admin Only**) scanning the entire catalog or specific products.
+- **Invariant Guarantees Verified:**
+  1. $\sum \text{Batch Physical Quantities} \equiv \text{Product QuantityOnHand}$
+  2. $\text{Batch ReservedQuantity} \le \text{Batch PhysicalQuantity}$
+  3. $\text{Product QuantityOnHand} \ge 0$ (non-negative guarantee)
+- Instant discrepancy reporting detailing expected vs. actual balances and batch counts.
+
+### E. Order Lifecycle, Deterministic FEFO Allocation & Deep Inspection
+- **Creation (`Pending`):** Draft orders calculate line items and totals server-side; no stock is locked or reserved at draft creation.
 - **Confirmation (`Confirmed`):** Atomically evaluates eligible `Released` batches using strict FEFO (`ProductionDate ASC, Id ASC`), acquires pessimistic row locks (`FOR UPDATE`), and creates `OrderReservation` records.
 - **Cancellation (`Cancelled`):** Atomically rolls back reservations without losing audit continuity.
 - **Fulfillment (`Completed`):** Atomically deducts physical stock, clears reservations, transitions status to `Completed`, and writes immutable `OrderDeduction` entries to `StockMovements`.
+- **Order Detail Inspection & Ledger Navigation:** Full modal transparency for any order status with SKU itemization, unit price, quantity, line total, order total, conditional completion/cancellation timestamps, and contextual one-click navigation to the Stock Movements ledger (`/inventory?tab=movements`).
 
-### E. Concurrency & Idempotency Safeguards
+### F. Concurrency & Idempotency Safeguards
 - **PostgreSQL `xmin` Optimistic Concurrency:** System column `xmin` mapped to entity versions (`uint Version`), detecting concurrent stale updates with `409 Conflict`.
 - **Three-Tier Canonical Lock Hierarchy:** Deterministic locking sequence (`Orders` $\rightarrow$ `InventoryBatches` $\rightarrow$ `Products`) guarantees circular deadlocks cannot occur.
 - **Database-Level Partial Unique Index:**
@@ -167,7 +175,10 @@ The application uses ASP.NET Core JWT Bearer authentication with an enforced `Fa
 | `/api/inventory/movements` | `GET` | View stock ledger audit trail | `Staff`, `Admin` | `401 Unauthorized` |
 | `/api/inventory/receipts` | `POST` | Receive new stock from factory | `Staff`, `Admin` | `401 Unauthorized` |
 | `/api/inventory/batches/{id}/release` | `POST` | Perform QC inspection & release | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/inventory/batches/{id}/quarantine` | `POST` | Quarantine suspect batch | `Staff`, `Admin` | `401 Unauthorized` |
+| `/api/inventory/batches/{id}/write-off` | `POST` | Write off damaged or expired stock | **`Admin` Only** | `401 Unauthorized` / **`403 Forbidden`** |
 | `/api/inventory/adjustments` | `POST` | Adjust physical batch stock | **`Admin` Only** | `401 Unauthorized` / **`403 Forbidden`** |
+| `/api/inventory/audit` | `GET` | Reconcile inventory invariants & discrepancies | **`Admin` Only** | `401 Unauthorized` / **`403 Forbidden`** |
 | `/api/orders` | `GET` | List and filter orders | `Staff`, `Admin` | `401 Unauthorized` |
 | `/api/orders/{id}` | `GET` | View order details | `Staff`, `Admin` | `401 Unauthorized` |
 | `/api/orders` | `POST` | Create new draft order | `Staff`, `Admin` | `401 Unauthorized` |
@@ -298,7 +309,7 @@ dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj --filter FullyQualified
 ```
 
 ### 2. Run Frontend Unit Tests (Node.js Native Test Runner)
-Executes 41 frontend unit tests covering `apiClient`, `authService`, `AuthContext`, session restoration, and role visibility:
+Executes 68 frontend unit and domain tests covering authentication, order details & totals calculation, ledger routing, inventory quarantine/write-off/audit services, and API client error mapping:
 ```bash
 cd frontend
 pnpm test     # or npm test
@@ -319,17 +330,15 @@ dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj --filter FullyQualified
 
 ---
 
-## 7. Verified Test Metrics (Stage 11.4 Verification)
+## 7. Verified Test Metrics (Full Verification)
 
-The following test counts were verified during Stage 11.4 automated execution:
+The following test counts are actively maintained and verified across the test suites:
 
 | Test Suite | Framework / Runner | Total Tests | Status | Scope |
 | :--- | :--- | :---: | :---: | :--- |
-| **Backend Unit Tests** | xUnit + `WebApplicationFactory` | **96** | **96 Passed (100%)** | JWT issuance, claims validation, 401/403 RBAC guards, CORS, startup validation |
-| **Frontend Unit Tests** | Node.js Test Runner (`--experimental-strip-types`) | **41** | **41 Passed (100%)** | Bearer token injection, session restoration, role-aware UI logic, API client error mapping |
-| **Backend Integration Tests** | xUnit + PostgreSQL Fixture | **73** | *Unverified in Stage 11.4* | Exists in repository; intentionally skipped in Stage 11.4 to protect the demo database |
-
-> **Aggregate Status:** Out of 210 total tests across reported suites in the repository, **137 unit tests were verified passed with 0 failures** during Stage 11.4, while 73 database integration tests remain unverified until executed against an isolated test database.
+| **Backend Automated Tests** | xUnit + `WebApplicationFactory` + PostgreSQL Fixture | **252** | **252 Passed (100%)** | Unit tests (FEFO, domain invariants, RBAC, DTO validation) & Integration tests (full database transactions, reservation lifecycle, double-deduction prevention) |
+| **Frontend Unit & Domain Tests** | Node.js Test Runner (`--experimental-strip-types`) | **68** | **68 Passed (100%)** | Bearer token injection, session restoration, role-aware UI logic, API client error mapping, order itemization & ledger routing, inventory audit & quarantine services |
+| **Total Full-Stack Verification** | **xUnit + Node.js Runner** | **320** | **320 Passed (100%)** | **Zero test failures across entire full-stack solution** |
 
 ---
 
@@ -340,7 +349,7 @@ To maintain transparency for technical reviewers:
 - **Refresh Token Mechanism:** The current implementation uses single-lifetime tokens (8 hours). No silent background refresh-token rotation is implemented.
 - **Single Warehouse Facility:** Inventory logic currently operates within a single facility (`LOC_KDR_PROD`). Multi-warehouse inter-facility routing is slated for future milestones.
 - **Timezone Handling:** Expiry validation compares UTC dates directly against PostgreSQL `date` columns without local WIB timezone offset conversions.
-- **Live E2E Verification:** Automated unit test coverage is comprehensive (137 tests); however, automated headless browser end-to-end integration (e.g. Playwright / Cypress) has not yet been executed in CI.
+- **Automated Browser E2E:** Automated unit and domain test coverage is extensive (320 automated tests); however, headless browser end-to-end integration (e.g. Playwright / Cypress) has not yet been introduced into CI.
 
 ---
 

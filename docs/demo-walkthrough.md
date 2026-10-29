@@ -301,6 +301,15 @@ To prove that security is enforced by the backend and not merely hidden in the U
 - **Request Body:** `{ "batchId": 2, "quantityChange": -1, "reason": "Staff attempt", "batchRowVersion": 1 }`
 - **Expected Response:** `403 Forbidden`
 
+#### Attempt 3: Staff calls Batch Write-Off
+- **Endpoint:** `POST /api/inventory/batches/2/write-off`
+- **Request Body:** `{ "quantity": 5, "reason": "Spoilage", "batchRowVersion": 1 }`
+- **Expected Response:** `403 Forbidden`
+
+#### Attempt 4: Staff calls Inventory Invariant Audit
+- **Endpoint:** `GET /api/inventory/audit`
+- **Expected Response:** `403 Forbidden`
+
 > **Key Takeaway:** The user's active session is **not** terminated on `403 Forbidden`. The user remains authenticated, but the specific operation is blocked.
 
 ---
@@ -385,7 +394,49 @@ Browser Flow:
 
 ---
 
-### 5. Logout & Access Revocation
+### 5. Inventory Operations: Quarantine, Write-Off & Movements Ledger
+1. Navigate to the **Inventory Page (`/inventory`)**:
+   - The top tab navigation includes **Batches**, **Stock Movements**, and (for Admin) **Invariant Audit**.
+2. **Batch Quarantine Workflow:**
+   - On a batch with `PendingRelease` or `Released` status, click the **Quarantine** button.
+   - The `QuarantineBatchModal` opens: enter a reason ($\ge 5$ characters, e.g., `"Package seam inspection required"`) and optional notes.
+   - Click **Confirm Quarantine**: the batch status updates to `Quarantined`, locking it from order allocation while preserving physical inventory.
+3. **Batch Write-Off Workflow (Admin Only):**
+   - As an Administrator, click **Write-Off** on an eligible batch.
+   - The `WriteOffBatchModal` prompts for write-off quantity ($\le$ physical quantity), reason, and disposal document number.
+   - Submit: physical batch balance and product `QuantityOnHand` decrease synchronously, transitioning to `Depleted` if quantity reaches zero.
+4. **Stock Movements Ledger (`/inventory?tab=movements`):**
+   - Click the **Stock Movements** tab.
+   - View the immutable audit trail displaying Date, Movement Type (Receipt, Adjustment, WriteOff, OrderDeduction, OrderCancellation), Product SKU, Batch No, Reference Order badge, Quantity Change, and resultant Batch / Product balances.
+   - Test filters: filter by Movement Type or specific Product.
+
+---
+
+### 6. Administrative Invariant Audit Engine (`/inventory?tab=audit`)
+1. Logged in as Administrator, click the **Invariant Audit** tab.
+2. The UI calls `GET /api/inventory/audit`:
+   - Summary statistics display Total Products Scanned, Total Batches Audited, and Discrepancy Count.
+   - When all balances are mathematically aligned ($\sum \text{Batches} = \text{Product QuantityOnHand}$ and $\text{Reserved} \le \text{Physical}$), a green **All Invariants Intact** badge is displayed.
+   - Click **Run Audit Reconciliation** to trigger an on-demand re-scan.
+3. If logged in as Staff, the Invariant Audit tab is completely hidden from the UI, and direct API access is rejected with `403 Forbidden`.
+
+---
+
+### 7. Order Lifecycle, Deep Inspection & Ledger Navigation
+1. Navigate to **Orders Page (`/orders`)**:
+   - All orders (Pending, Confirmed, Completed, Cancelled) display an active **Details** button.
+2. **Order Detail Inspection (`OrderDetailModal`):**
+   - Click **Details** on any order to open the read-only modal.
+   - View customer name, email, status badge, itemized product lines (SKU, quantity, unit price in IDR, line totals), and aggregate order total.
+   - Timestamps (`createdAt`, `confirmedAt`, `completedAt`, `cancelledAt`) and cancellation reasons are displayed conditionally based on actual status.
+3. **Contextual Ledger Navigation:**
+   - Open a `Completed` (fulfilled) order.
+   - Notice the green notification banner: *"Order fulfillment has updated inventory balances."*
+   - Click the **Go to Stock Movements** button: the modal closes and the browser navigates smoothly to `/inventory?tab=movements` with the movements ledger opened.
+
+---
+
+### 8. Logout & Access Revocation
 1. Click **Logout** from the Navbar.
 2. Manually enter `http://localhost:5173/orders` in the browser address bar.
 3. **Observed Behavior:** Access is rejected; the browser immediately redirects to `/login`.

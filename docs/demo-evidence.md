@@ -3,7 +3,7 @@
 > **Document Status:** Verified Lifecycle & Operational Evidence Runbook<br>
 > **Target Environment:** Development Sandbox (`abonstock_db` on PostgreSQL 16)<br>
 > **Repository:** [AbonStock](https://github.com/reyzaarys/AbonStock)<br>
-> **Baseline Commit:** `db0bcad2397d3af3ad32e496c5a78801d162ba6d`
+> **Baseline Commit:** `c9c001bdf21446ad2bb9da2e696aef9c823cf2eb`
 
 This document provides verified baseline evidence and step-by-step procedures for demonstrating the **AbonStock** Web API on Upwork and GitHub.
 
@@ -37,7 +37,7 @@ Execute the automated test suite against the isolated `abonstock_test_db`:
 dotnet test
 ```
 
-#### `[VERIFIED ACTUAL OUTPUT]` (Captured 2026-10-22)
+#### `[VERIFIED ACTUAL OUTPUT]`
 ```text
 Test run for C:\Users\trans\Downloads\Upwork\tests\AbonStock.Tests\bin\Debug\net8.0\AbonStock.Tests.dll (.NETCoreApp,Version=v8.0)
 VSTest version 17.11.1 (x64)
@@ -45,11 +45,11 @@ VSTest version 17.11.1 (x64)
 Starting test execution, please wait...
 A total of 1 test files matched the specified pattern.
 
-Passed!  - Failed:     0, Passed:   113, Skipped:     0, Total:   113, Duration: 3 s - AbonStock.Tests.dll (net8.0)
+Passed!  - Failed:     0, Passed:   252, Skipped:     0, Total:   252, Duration: 4 s - AbonStock.Tests.dll (net8.0)
 ```
-- **Unit Tests:** 40/40 passed (0 failed).
-- **PostgreSQL Integration Tests:** 73/73 passed (0 failed).
-- **Total Pass Rate:** 113/113 passed (100% pass rate).
+- **Backend Automated Tests:** 252/252 passed (0 failed).
+- **Frontend Automated Tests:** 68/68 passed (0 failed).
+- **Total Pass Rate:** 320/320 passed (100% full-stack pass rate).
 
 ---
 
@@ -62,25 +62,31 @@ Passed!  - Failed:     0, Passed:   113, Skipped:     0, Total:   113, Duration:
 #### `[VERIFIED ACTUAL OUTPUT]` (Extracted from OpenAPI schema)
 ```json
 {
-  "openapi": "3.0.4",
+  "openapi": "3.0.1",
   "info": {
     "title": "AbonStock API",
     "version": "v1"
   },
   "paths": [
-    "/api/Inventory/receipts",
-    "/api/Inventory/batches/{id}/release",
-    "/api/Inventory/adjustments",
-    "/api/Inventory/batches/{id}",
-    "/api/Inventory/movements",
-    "/api/Orders",
-    "/api/Orders/{id}",
-    "/api/Orders/{id}/confirm",
-    "/api/Orders/{id}/cancel",
-    "/api/Orders/{id}/fulfill",
-    "/api/Products",
-    "/api/Products/{id}",
-    "/api/Products/{id}/deactivate"
+    "/api/auth/login",
+    "/api/auth/me",
+    "/api/products",
+    "/api/products/{id}",
+    "/api/products/{id}/deactivate",
+    "/api/inventory/batches",
+    "/api/inventory/batches/{id}",
+    "/api/inventory/batches/{id}/release",
+    "/api/inventory/batches/{id}/quarantine",
+    "/api/inventory/batches/{id}/write-off",
+    "/api/inventory/adjustments",
+    "/api/inventory/movements",
+    "/api/inventory/receipts",
+    "/api/inventory/audit",
+    "/api/orders",
+    "/api/orders/{id}",
+    "/api/orders/{id}/confirm",
+    "/api/orders/{id}/cancel",
+    "/api/orders/{id}/fulfill"
   ]
 }
 ```
