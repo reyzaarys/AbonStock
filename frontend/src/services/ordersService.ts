@@ -28,7 +28,8 @@ export const ordersService = {
     apiClient.get<OrderResponse>(`/api/orders/${id}`, { signal }),
 
   /**
-   * Creates a new customer order and reserves stock across available batches.
+   * Creates a new customer order in Pending status without deducting or reserving physical stock.
+   * Stock reservation is deferred to order confirmation (FEFO allocation).
    * POST /api/orders
    */
   create: (data: CreateOrderRequest, signal?: AbortSignal): Promise<OrderResponse> =>

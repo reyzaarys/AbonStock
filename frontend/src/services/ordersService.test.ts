@@ -123,6 +123,275 @@ describe('ordersService unit tests', () => {
     assert.equal(order.version, 2);
   });
 
+  test('ordersService.getById loads complete order with line items and item totals', async () => {
+    let capturedUrl = '';
+
+    globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
+      capturedUrl = String(input);
+
+      return new Response(
+        JSON.stringify({
+          id: 10,
+          orderNumber: 'ORD-20261025-0010',
+          customerName: 'Resto Padang Sederhana',
+          customerEmail: 'order@sederhana.com',
+          status: 'Confirmed',
+          totalAmount: 250000,
+          createdAtUtc: '2026-10-25T08:00:00Z',
+          updatedAtUtc: '2026-10-25T08:15:00Z',
+          confirmedAtUtc: '2026-10-25T08:15:00Z',
+          cancelledAtUtc: null,
+          cancellationReason: null,
+          completedAtUtc: null,
+          version: 2,
+          items: [
+            {
+              id: 201,
+              productId: 1,
+              productSku: 'ABON-SAPI-250G',
+              productName: 'Abon Sapi Premium 250g',
+              quantity: 2,
+              unitPrice: 65000,
+              lineTotal: 130000,
+            },
+            {
+              id: 202,
+              productId: 2,
+              productSku: 'ABON-AYAM-250G',
+              productName: 'Abon Ayam Spesial 250g',
+              quantity: 3,
+              unitPrice: 40000,
+              lineTotal: 120000,
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    };
+
+    const order = await ordersService.getById(10);
+
+    assert.ok(capturedUrl.endsWith('/api/orders/10'));
+    assert.equal(order.id, 10);
+    assert.equal(order.orderNumber, 'ORD-20261025-0010');
+    assert.equal(order.customerName, 'Resto Padang Sederhana');
+    assert.equal(order.customerEmail, 'order@sederhana.com');
+    assert.equal(order.items.length, 2);
+    assert.equal(order.items[0].productSku, 'ABON-SAPI-250G');
+    assert.equal(order.items[0].quantity, 2);
+    assert.equal(order.items[0].lineTotal, 130000);
+    assert.equal(order.items[1].productSku, 'ABON-AYAM-250G');
+    assert.equal(order.items[1].quantity, 3);
+    assert.equal(order.items[1].lineTotal, 120000);
+    const sumLines = order.items.reduce((s, it) => s + it.lineTotal, 0);
+    assert.equal(sumLines, order.totalAmount);
+  });
+
+  test('ordersService.getById handles Completed order with completion timestamp', async () => {
+    globalThis.fetch = async (): Promise<Response> => {
+      return new Response(
+        JSON.stringify({
+          id: 11,
+          orderNumber: 'ORD-20261025-0011',
+          customerName: 'Catering Berkah',
+          customerEmail: 'catering@berkah.com',
+          status: 'Completed',
+          totalAmount: 180000,
+          createdAtUtc: '2026-10-25T07:00:00Z',
+          updatedAtUtc: '2026-10-25T07:30:00Z',
+          confirmedAtUtc: '2026-10-25T07:10:00Z',
+          cancelledAtUtc: null,
+          cancellationReason: null,
+          completedAtUtc: '2026-10-25T07:30:00Z',
+          version: 3,
+          items: [
+            {
+              id: 205,
+              productId: 3,
+              productSku: 'ABON-PEDAS-100G',
+              productName: 'Abon Pedas Manis 100g',
+              quantity: 10,
+              unitPrice: 18000,
+              lineTotal: 180000,
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    };
+
+    const order = await ordersService.getById(11);
+    assert.equal(order.status, 'Completed');
+    assert.equal(order.completedAtUtc, '2026-10-25T07:30:00Z');
+    assert.equal(order.confirmedAtUtc, '2026-10-25T07:10:00Z');
+    assert.equal(order.cancelledAtUtc, null);
+    assert.equal(order.cancellationReason, null);
+  });
+
+  test('ordersService.getById handles Cancelled order with reason and cancellation timestamp', async () => {
+    globalThis.fetch = async (): Promise<Response> => {
+      return new Response(
+        JSON.stringify({
+          id: 12,
+          orderNumber: 'ORD-20261025-0012',
+          customerName: 'Pak Budi',
+          customerEmail: null,
+          status: 'Cancelled',
+          totalAmount: 50000,
+          createdAtUtc: '2026-10-25T06:00:00Z',
+          updatedAtUtc: '2026-10-25T06:20:00Z',
+          confirmedAtUtc: '2026-10-25T06:05:00Z',
+          cancelledAtUtc: '2026-10-25T06:20:00Z',
+          cancellationReason: 'Customer requested cancellation prior to dispatch',
+          completedAtUtc: null,
+          version: 3,
+          items: [
+            {
+              id: 208,
+              productId: 2,
+              productSku: 'ABON-SAPI-100G',
+              productName: 'Abon Sapi Gurih 100g',
+              quantity: 2,
+              unitPrice: 25000,
+              lineTotal: 50000,
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    };
+
+    const order = await ordersService.getById(12);
+    assert.equal(order.status, 'Cancelled');
+    assert.equal(order.cancelledAtUtc, '2026-10-25T06:20:00Z');
+    assert.equal(order.cancellationReason, 'Customer requested cancellation prior to dispatch');
+    assert.equal(order.completedAtUtc, null);
+  });
+
+  test('ordersService.getById handles null optional fields gracefully', async () => {
+    globalThis.fetch = async (): Promise<Response> => {
+      return new Response(
+        JSON.stringify({
+          id: 13,
+          orderNumber: 'ORD-20261025-0013',
+          customerName: 'Walk-in Customer',
+          customerEmail: null,
+          status: 'Pending',
+          totalAmount: 25000,
+          createdAtUtc: '2026-10-25T09:00:00Z',
+          updatedAtUtc: '2026-10-25T09:00:00Z',
+          confirmedAtUtc: null,
+          cancelledAtUtc: null,
+          cancellationReason: null,
+          completedAtUtc: null,
+          version: 1,
+          items: [],
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    };
+
+    const order = await ordersService.getById(13);
+    assert.equal(order.customerEmail, null);
+    assert.equal(order.confirmedAtUtc, null);
+    assert.equal(order.completedAtUtc, null);
+    assert.equal(order.cancelledAtUtc, null);
+    assert.equal(order.cancellationReason, null);
+    assert.equal(order.items.length, 0);
+  });
+
+  test('ordersService.getById propagates 404 ApiError when order not found', async () => {
+    globalThis.fetch = async (): Promise<Response> => {
+      return new Response(
+        JSON.stringify({
+          type: 'https://tools.ietf.org/html/rfc9110#section-15.5.5',
+          title: 'Not Found',
+          status: 404,
+          detail: 'Order with ID 9999 was not found.',
+        }),
+        {
+          status: 404,
+          headers: { 'Content-Type': 'application/problem+json' },
+        }
+      );
+    };
+
+    await assert.rejects(
+      async () => {
+        await ordersService.getById(9999);
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof ApiError);
+        assert.equal(err.status, 404);
+        assert.ok(err.message.includes('Order with ID 9999 was not found'));
+        return true;
+      }
+    );
+  });
+
+  test('ordersService.getById propagates 500 ApiError on server error', async () => {
+    globalThis.fetch = async (): Promise<Response> => {
+      return new Response(
+        JSON.stringify({
+          type: 'https://tools.ietf.org/html/rfc9110#section-15.6.1',
+          title: 'Internal Server Error',
+          status: 500,
+          detail: 'Database connection failed unexpectedly.',
+        }),
+        {
+          status: 500,
+          headers: { 'Content-Type': 'application/problem+json' },
+        }
+      );
+    };
+
+    await assert.rejects(
+      async () => {
+        await ordersService.getById(10);
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof ApiError);
+        assert.equal(err.status, 500);
+        return true;
+      }
+    );
+  });
+
+  test('ordersService.getById respects AbortSignal', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (init?.signal?.aborted) {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }
+      return new Response('{}', { status: 200 });
+    };
+
+    await assert.rejects(
+      async () => {
+        await ordersService.getById(10, controller.signal);
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof DOMException);
+        assert.equal(err.name, 'AbortError');
+        return true;
+      }
+    );
+  });
+
   test('ordersService.create sends POST to /api/orders with request body', async () => {
     let capturedUrl = '';
     let capturedMethod = '';

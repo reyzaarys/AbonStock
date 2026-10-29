@@ -10,6 +10,7 @@ import {
   X,
   AlertCircle,
   Info,
+  Eye,
 } from 'lucide-react';
 import { ordersService } from '../../services';
 import type { OrderListQuery, OrderResponse, OrderStatus, PagedResult } from '../../types';
@@ -26,6 +27,7 @@ import { CreateOrderModal } from './CreateOrderModal';
 import { ConfirmOrderModal } from './ConfirmOrderModal';
 import { CancelOrderModal } from './CancelOrderModal';
 import { FulfillOrderModal } from './FulfillOrderModal';
+import { OrderDetailModal } from './OrderDetailModal';
 
 interface ToastNotification {
   type: 'success' | 'error';
@@ -49,6 +51,7 @@ export const OrdersPage: React.FC = () => {
   const [confirmingOrder, setConfirmingOrder] = useState<OrderResponse | null>(null);
   const [cancellingOrder, setCancellingOrder] = useState<OrderResponse | null>(null);
   const [fulfillingOrder, setFulfillingOrder] = useState<OrderResponse | null>(null);
+  const [viewingOrder, setViewingOrder] = useState<OrderResponse | null>(null);
 
   // Feedback notifications
   const [toast, setToast] = useState<ToastNotification | null>(null);
@@ -247,7 +250,7 @@ export const OrdersPage: React.FC = () => {
                   <th className="text-center" style={{ width: '70px' }}>
                     Version
                   </th>
-                  <th className="text-center" style={{ width: '180px' }}>
+                  <th className="text-center" style={{ width: '220px' }}>
                     Actions
                   </th>
                 </tr>
@@ -323,6 +326,16 @@ export const OrdersPage: React.FC = () => {
                           className="table-actions"
                           style={{ justifyContent: 'center' }}
                         >
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => setViewingOrder(order)}
+                            title={`View details for order ${order.orderNumber}`}
+                          >
+                            <Eye size={13} />
+                            <span>Details</span>
+                          </button>
+
                           {order.status === 'Pending' && (
                             <>
                               <button
@@ -499,6 +512,17 @@ export const OrdersPage: React.FC = () => {
             setFulfillingOrder(latest);
             fetchOrders();
           });
+        }}
+      />
+
+      {/* Order Detail Modal */}
+      <OrderDetailModal
+        order={viewingOrder}
+        isOpen={!!viewingOrder}
+        onClose={() => setViewingOrder(null)}
+        onOrderUpdated={(updated) => {
+          setViewingOrder(updated);
+          fetchOrders();
         }}
       />
     </div>

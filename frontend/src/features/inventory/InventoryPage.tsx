@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search,
   RefreshCw,
@@ -51,10 +52,43 @@ type InventoryTab = 'batches' | 'movements' | 'audit';
 
 export const InventoryPage: React.FC = () => {
   const { isAdmin } = useAuth();
-  const [activeTab, setActiveTab] = useState<InventoryTab>('batches');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabQuery = searchParams.get('tab');
+  const validInitialTab: InventoryTab =
+    tabQuery === 'movements' || (tabQuery === 'audit' && isAdmin)
+      ? tabQuery
+      : 'batches';
+  const [activeTab, setActiveTab] = useState<InventoryTab>(validInitialTab);
   const [data, setData] = useState<PagedResult<BatchResponse> | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<unknown | null>(null);
+
+  useEffect(() => {
+    const t = searchParams.get('tab');
+    if (t === 'movements') {
+      setActiveTab('movements');
+    } else if (t === 'audit' && isAdmin) {
+      setActiveTab('audit');
+    } else {
+      setActiveTab('batches');
+    }
+  }, [searchParams, isAdmin]);
+
+  const handleTabChange = (tab: InventoryTab) => {
+    setActiveTab(tab);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (tab === 'batches') {
+          next.delete('tab');
+        } else {
+          next.set('tab', tab);
+        }
+        return next;
+      },
+      { replace: true }
+    );
+  };
 
   // Filters & sorting state
   const [page, setPage] = useState<number>(1);
@@ -237,7 +271,7 @@ export const InventoryPage: React.FC = () => {
       >
         <button
           type="button"
-          onClick={() => setActiveTab('batches')}
+          onClick={() => handleTabChange('batches')}
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -269,7 +303,7 @@ export const InventoryPage: React.FC = () => {
 
         <button
           type="button"
-          onClick={() => setActiveTab('movements')}
+          onClick={() => handleTabChange('movements')}
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -294,7 +328,7 @@ export const InventoryPage: React.FC = () => {
         {isAdmin && (
           <button
             type="button"
-            onClick={() => setActiveTab('audit')}
+            onClick={() => handleTabChange('audit')}
             style={{
               display: 'flex',
               alignItems: 'center',
