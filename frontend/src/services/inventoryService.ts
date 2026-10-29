@@ -2,7 +2,9 @@ import { apiClient } from '../lib/apiClient.ts';
 import type {
   BatchListQuery,
   BatchResponse,
+  InventoryAuditResponse,
   PagedResult,
+  QuarantineBatchRequest,
   ReleaseBatchRequest,
   StockAdjustmentRequest,
   StockAdjustmentResponse,
@@ -10,6 +12,8 @@ import type {
   StockMovementResponse,
   StockReceiptRequest,
   StockReceiptResponse,
+  WriteOffBatchRequest,
+  WriteOffBatchResponse,
 } from '../types';
 
 export const inventoryService = {
@@ -55,6 +59,28 @@ export const inventoryService = {
     apiClient.post<BatchResponse>(`/api/inventory/batches/${id}/release`, data, { signal }),
 
   /**
+   * Quarantines a batch failing quality checks or suffering damage/contamination.
+   * POST /api/inventory/batches/{id}/quarantine
+   */
+  quarantineBatch: (
+    id: number,
+    data: QuarantineBatchRequest,
+    signal?: AbortSignal
+  ): Promise<BatchResponse> =>
+    apiClient.post<BatchResponse>(`/api/inventory/batches/${id}/quarantine`, data, { signal }),
+
+  /**
+   * Writes off physical stock from an active batch (quarantined or damaged stock disposal).
+   * POST /api/inventory/batches/{id}/write-off
+   */
+  writeOffBatch: (
+    id: number,
+    data: WriteOffBatchRequest,
+    signal?: AbortSignal
+  ): Promise<WriteOffBatchResponse> =>
+    apiClient.post<WriteOffBatchResponse>(`/api/inventory/batches/${id}/write-off`, data, { signal }),
+
+  /**
    * Adjusts stock quantity on an active batch (spoilage, correction, count discrepancy).
    * POST /api/inventory/adjustments
    */
@@ -74,6 +100,19 @@ export const inventoryService = {
   ): Promise<PagedResult<StockMovementResponse>> =>
     apiClient.get<PagedResult<StockMovementResponse>>('/api/inventory/movements', {
       params: query as Record<string, unknown>,
+      signal,
+    }),
+
+  /**
+   * Retrieves diagnostic invariant and ledger consistency audit.
+   * GET /api/inventory/audit
+   */
+  auditInventory: (
+    productId?: number,
+    signal?: AbortSignal
+  ): Promise<InventoryAuditResponse> =>
+    apiClient.get<InventoryAuditResponse>('/api/inventory/audit', {
+      params: productId !== undefined ? { productId } : undefined,
       signal,
     }),
 };

@@ -87,6 +87,45 @@ export interface ReleaseBatchRequest {
 }
 
 /**
+ * Payload for POST /api/inventory/batches/{id}/quarantine matching AbonStock.Api.Dtos.Inventory.QuarantineBatchRequest.
+ */
+export interface QuarantineBatchRequest {
+  reason: string;
+  notes?: string | null;
+  rowVersion: number;
+}
+
+/**
+ * Payload for POST /api/inventory/batches/{id}/write-off matching AbonStock.Api.Dtos.Inventory.WriteOffBatchRequest.
+ */
+export interface WriteOffBatchRequest {
+  quantity: number;
+  reason: string;
+  batchRowVersion: number;
+  productRowVersion?: number;
+  disposalDocumentNumber?: string | null;
+}
+
+/**
+ * Response matching AbonStock.Api.Dtos.Inventory.WriteOffBatchResponse.
+ */
+export interface WriteOffBatchResponse {
+  batchId: number;
+  productId: number;
+  batchNo: string;
+  writtenOffQuantity: number;
+  previousPhysicalQuantity: number;
+  newPhysicalQuantity: number;
+  previousProductQuantityOnHand: number;
+  newProductQuantityOnHand: number;
+  status: BatchStatus;
+  movementId: number;
+  batchVersion: number;
+  productVersion: number;
+  timestampUtc: string;
+}
+
+/**
  * Payload for POST /api/inventory/adjustments matching AbonStock.Api.Dtos.Inventory.StockAdjustmentRequest.
  */
 export interface StockAdjustmentRequest {
@@ -116,7 +155,7 @@ export interface StockAdjustmentResponse {
 /**
  * Stock movement types matching AbonStock.Api.Entities.StockMovementType string representation.
  */
-export type StockMovementType = 'Receipt' | 'Adjustment' | 'OrderDeduction' | 'OrderCancellation';
+export type StockMovementType = 'Receipt' | 'Adjustment' | 'OrderDeduction' | 'OrderCancellation' | 'WriteOff';
 
 /**
  * Stock movement DTO matching AbonStock.Api.Dtos.Inventory.StockMovementResponse.
@@ -146,4 +185,63 @@ export interface StockMovementListQuery {
   productId?: number;
   batchId?: number;
   movementType?: StockMovementType | string;
+}
+
+/**
+ * Product-level inventory discrepancy matching AbonStock.Api.Dtos.Inventory.ProductDiscrepancyResponse.
+ */
+export interface ProductDiscrepancyResponse {
+  productId: number;
+  sku: string;
+  productName: string;
+  expectedQuantityOnHand: number;
+  actualQuantityOnHand: number;
+  discrepancy: number;
+  batchCount: number;
+  isConsistent: boolean;
+}
+
+/**
+ * Batch-level invariant violation matching AbonStock.Api.Dtos.Inventory.BatchInvariantViolationResponse.
+ */
+export interface BatchInvariantViolationResponse {
+  batchId: number;
+  productId: number;
+  productSku: string | null;
+  batchNo: string;
+  status: string;
+  physicalQuantity: number;
+  reservedQuantity: number;
+  violationType: string;
+  description: string;
+}
+
+/**
+ * Ledger audit health status.
+ */
+export type LedgerAuditStatus = 'Valid' | 'Compromised' | 'Unverifiable';
+
+/**
+ * Stock ledger audit response matching AbonStock.Api.Dtos.Inventory.LedgerAuditResponse.
+ */
+export interface LedgerAuditResponse {
+  status: LedgerAuditStatus | string;
+  totalMovementsChecked: number;
+  issues: string[];
+  limitations: string[];
+  summary: string;
+}
+
+/**
+ * Full inventory invariant audit response matching AbonStock.Api.Dtos.Inventory.InventoryAuditResponse.
+ */
+export interface InventoryAuditResponse {
+  auditTimestampUtc: string;
+  totalProductsChecked: number;
+  consistentProductsCount: number;
+  inconsistentProductsCount: number;
+  discrepancies: ProductDiscrepancyResponse[];
+  invariantViolations: BatchInvariantViolationResponse[];
+  ledgerAudit: LedgerAuditResponse;
+  isSystemConsistent: boolean;
 }

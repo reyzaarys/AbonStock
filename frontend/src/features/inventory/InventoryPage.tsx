@@ -6,9 +6,12 @@ import {
   ArrowUpDown,
   Plus,
   ShieldCheck,
+  ShieldAlert,
   Sliders,
+  Trash2,
   CheckCircle2,
   X,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { inventoryService } from '../../services';
 import type {
@@ -19,6 +22,7 @@ import type {
   PagedResult,
   StockAdjustmentResponse,
   StockReceiptResponse,
+  WriteOffBatchResponse,
 } from '../../types';
 import {
   PageHeader,
@@ -32,6 +36,10 @@ import { formatDate } from '../../lib';
 import { ReceiveStockModal } from './ReceiveStockModal';
 import { ReleaseBatchModal } from './ReleaseBatchModal';
 import { StockAdjustmentModal } from './StockAdjustmentModal';
+import { QuarantineBatchModal } from './QuarantineBatchModal';
+import { WriteOffBatchModal } from './WriteOffBatchModal';
+import { StockMovementsTab } from './StockMovementsTab';
+import { InventoryAuditTab } from './InventoryAuditTab';
 import { useAuth } from '../../context/AuthContext';
 
 interface ToastNotification {
@@ -39,8 +47,11 @@ interface ToastNotification {
   message: string;
 }
 
+type InventoryTab = 'batches' | 'movements' | 'audit';
+
 export const InventoryPage: React.FC = () => {
   const { isAdmin } = useAuth();
+  const [activeTab, setActiveTab] = useState<InventoryTab>('batches');
   const [data, setData] = useState<PagedResult<BatchResponse> | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<unknown | null>(null);
@@ -58,6 +69,8 @@ export const InventoryPage: React.FC = () => {
   const [receiveModalOpen, setReceiveModalOpen] = useState(false);
   const [releasingBatch, setReleasingBatch] = useState<BatchResponse | null>(null);
   const [adjustingBatch, setAdjustingBatch] = useState<BatchResponse | null>(null);
+  const [quarantiningBatch, setQuarantiningBatch] = useState<BatchResponse | null>(null);
+  const [writingOffBatch, setWritingOffBatch] = useState<BatchResponse | null>(null);
 
   // Toast feedback
   const [toast, setToast] = useState<ToastNotification | null>(null);
@@ -166,34 +179,150 @@ export const InventoryPage: React.FC = () => {
     fetchBatches();
   };
 
+  const handleQuarantineSuccess = (quarantined: BatchResponse) => {
+    setToast({
+      type: 'success',
+      message: `Batch "${quarantined.batchNo}" successfully quarantined and withdrawn from sales allocation.`,
+    });
+    fetchBatches();
+  };
+
+  const handleWriteOffSuccess = (response: WriteOffBatchResponse) => {
+    setToast({
+      type: 'success',
+      message: `Stock write-off authorized: -${response.writtenOffQuantity} units deducted from batch "${response.batchNo}". New balance: ${response.newPhysicalQuantity} units (Status: ${response.status}).`,
+    });
+    fetchBatches();
+  };
+
   return (
     <div>
       <PageHeader
-        title="Inventory Batches"
-        description="Physical production batch tracking with deterministic FIFO/FEFO allocation, quality inspection statuses, and real-time available stock."
+        title="Inventory Management"
+        description="Full-cycle inventory tracking: physical production batches, immutable stock movement ledger, and invariant diagnostic audit."
         action={
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={() => fetchBatches()}
-              disabled={loading}
-              title="Refresh batch list"
-            >
-              <RefreshCw size={16} className={loading ? 'spinner' : ''} />
-              <span>Refresh</span>
-            </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => setReceiveModalOpen(true)}
-            >
-              <Plus size={16} />
-              <span>Receive Stock</span>
-            </button>
-          </div>
+          activeTab === 'batches' ? (
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => fetchBatches()}
+                disabled={loading}
+                title="Refresh batch list"
+              >
+                <RefreshCw size={16} className={loading ? 'spinner' : ''} />
+                <span>Refresh</span>
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => setReceiveModalOpen(true)}
+              >
+                <Plus size={16} />
+                <span>Receive Stock</span>
+              </button>
+            </div>
+          ) : undefined
         }
       />
+
+      {/* Tabs Navigation */}
+      <div
+        style={{
+          display: 'flex',
+          gap: '0.5rem',
+          borderBottom: '1px solid var(--color-border, #e2e8f0)',
+          marginBottom: '1.25rem',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setActiveTab('batches')}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            padding: '0.625rem 1rem',
+            fontSize: '0.875rem',
+            fontWeight: activeTab === 'batches' ? 600 : 500,
+            color: activeTab === 'batches' ? 'var(--color-primary, #2563eb)' : 'var(--color-text-muted, #64748b)',
+            borderBottom: activeTab === 'batches' ? '2px solid var(--color-primary, #2563eb)' : '2px solid transparent',
+            background: 'none',
+            borderTop: 'none',
+            borderLeft: 'none',
+            borderRight: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.15s ease',
+          }}
+        >
+          <Layers size={16} />
+          <span>Production Batches</span>
+          {data && (
+            <span
+              className="badge badge-neutral"
+              style={{ fontSize: '0.6875rem', padding: '0.125rem 0.375rem' }}
+            >
+              {data.totalCount}
+            </span>
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('movements')}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            padding: '0.625rem 1rem',
+            fontSize: '0.875rem',
+            fontWeight: activeTab === 'movements' ? 600 : 500,
+            color: activeTab === 'movements' ? 'var(--color-primary, #2563eb)' : 'var(--color-text-muted, #64748b)',
+            borderBottom: activeTab === 'movements' ? '2px solid var(--color-primary, #2563eb)' : '2px solid transparent',
+            background: 'none',
+            borderTop: 'none',
+            borderLeft: 'none',
+            borderRight: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.15s ease',
+          }}
+        >
+          <ArrowLeftRight size={16} />
+          <span>Stock Movements</span>
+        </button>
+
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('audit')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              padding: '0.625rem 1rem',
+              fontSize: '0.875rem',
+              fontWeight: activeTab === 'audit' ? 600 : 500,
+              color: activeTab === 'audit' ? 'var(--color-primary, #2563eb)' : 'var(--color-text-muted, #64748b)',
+              borderBottom: activeTab === 'audit' ? '2px solid var(--color-primary, #2563eb)' : '2px solid transparent',
+              background: 'none',
+              borderTop: 'none',
+              borderLeft: 'none',
+              borderRight: 'none',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <ShieldCheck size={16} />
+            <span>Invariant Audit</span>
+            <span
+              className="badge badge-info"
+              style={{ fontSize: '0.625rem', padding: '0.125rem 0.3125rem' }}
+            >
+              Admin
+            </span>
+          </button>
+        )}
+      </div>
 
       {toast && (
         <div
@@ -216,7 +345,10 @@ export const InventoryPage: React.FC = () => {
         </div>
       )}
 
-      <div className="filters-bar">
+      {/* Tab 1: Production Batches */}
+      {activeTab === 'batches' && (
+        <>
+          <div className="filters-bar">
         <div className="filter-group">
           <form onSubmit={handleSearchSubmit} className="search-input-wrap">
             <Search size={16} className="search-icon" />
@@ -388,35 +520,82 @@ export const InventoryPage: React.FC = () => {
                     <td className="text-center">
                       <div className="table-actions">
                         {batch.status === 'PendingRelease' && (
-                          <button
-                            type="button"
-                            className="btn btn-primary btn-sm"
-                            onClick={() => setReleasingBatch(batch)}
-                            title="Perform 3-point QC inspection and release"
-                          >
-                            <ShieldCheck size={13} />
-                            <span>QC Release</span>
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              onClick={() => setReleasingBatch(batch)}
+                              title="Perform 3-point QC inspection and release"
+                            >
+                              <ShieldCheck size={13} />
+                              <span>QC Release</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-warning btn-sm"
+                              onClick={() => setQuarantiningBatch(batch)}
+                              title="Quarantine batch failing QC checks or defective"
+                            >
+                              <ShieldAlert size={13} />
+                              <span>Quarantine</span>
+                            </button>
+                          </>
                         )}
 
                         {batch.status === 'Released' && (
+                          <>
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => setAdjustingBatch(batch)}
+                                title="Adjust physical stock quantity"
+                              >
+                                <Sliders size={13} />
+                                <span>Adjust</span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="btn btn-warning btn-sm"
+                              onClick={() => setQuarantiningBatch(batch)}
+                              title="Quarantine batch due to quality issues"
+                            >
+                              <ShieldAlert size={13} />
+                              <span>Quarantine</span>
+                            </button>
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                className="btn btn-danger btn-sm"
+                                onClick={() => setWritingOffBatch(batch)}
+                                title="Authorize stock write-off and disposal"
+                              >
+                                <Trash2 size={13} />
+                                <span>Write-Off</span>
+                              </button>
+                            )}
+                          </>
+                        )}
+
+                        {batch.status === 'Quarantined' && (
                           isAdmin ? (
                             <button
                               type="button"
-                              className="btn btn-secondary btn-sm"
-                              onClick={() => setAdjustingBatch(batch)}
-                              title="Adjust physical stock quantity"
+                              className="btn btn-danger btn-sm"
+                              onClick={() => setWritingOffBatch(batch)}
+                              title="Authorize disposal of quarantined stock"
                             >
-                              <Sliders size={13} />
-                              <span>Adjust</span>
+                              <Trash2 size={13} />
+                              <span>Write-Off</span>
                             </button>
                           ) : (
                             <span
-                              className="badge badge-neutral"
+                              className="badge badge-danger"
                               style={{ fontSize: '0.6875rem' }}
-                              title="Inventory adjustment requires Administrator privileges"
+                              title="Quarantined batch disposal requires Administrator privileges"
                             >
-                              Released
+                              Quarantined
                             </span>
                           )
                         )}
@@ -427,15 +606,6 @@ export const InventoryPage: React.FC = () => {
                             style={{ fontSize: '0.6875rem' }}
                           >
                             Depleted
-                          </span>
-                        )}
-
-                        {batch.status === 'Quarantined' && (
-                          <span
-                            className="badge badge-danger"
-                            style={{ fontSize: '0.6875rem' }}
-                          >
-                            Quarantined
                           </span>
                         )}
                       </div>
@@ -458,6 +628,14 @@ export const InventoryPage: React.FC = () => {
           />
         </div>
       )}
+      </>
+      )}
+
+      {/* Tab 2: Stock Movements Audit Trail */}
+      {activeTab === 'movements' && <StockMovementsTab />}
+
+      {/* Tab 3: Inventory Invariant Audit */}
+      {activeTab === 'audit' && <InventoryAuditTab />}
 
       {/* Inventory Workflow Modals */}
       <ReceiveStockModal
@@ -478,6 +656,20 @@ export const InventoryPage: React.FC = () => {
         isOpen={!!adjustingBatch}
         onClose={() => setAdjustingBatch(null)}
         onSuccess={handleAdjustmentSuccess}
+      />
+
+      <QuarantineBatchModal
+        batch={quarantiningBatch}
+        isOpen={!!quarantiningBatch}
+        onClose={() => setQuarantiningBatch(null)}
+        onSuccess={handleQuarantineSuccess}
+      />
+
+      <WriteOffBatchModal
+        batch={writingOffBatch}
+        isOpen={!!writingOffBatch}
+        onClose={() => setWritingOffBatch(null)}
+        onSuccess={handleWriteOffSuccess}
       />
     </div>
   );
