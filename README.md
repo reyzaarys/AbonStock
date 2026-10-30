@@ -213,16 +213,33 @@ The application uses ASP.NET Core JWT Bearer authentication with an enforced `Fa
 
 ---
 
-### Step 1: Start PostgreSQL Container
-Start the local PostgreSQL 16 Alpine container:
-```bash
-docker compose up -d
-```
-Verify the container is healthy:
-```bash
-docker ps --filter "name=abonstock-postgres"
-```
-The database container exposes port `5432` with username `abonstock` and database `abonstock_db` (see `.env.example`).
+### Step 1: Start PostgreSQL Container & Verify Test Database
+1. Start the local PostgreSQL 16 Alpine container:
+   ```bash
+   docker compose up -d
+   ```
+2. Verify the container is healthy:
+   ```bash
+   docker ps --filter "name=abonstock-postgres"
+   ```
+   The container exposes port `5432` with username `abonstock` and initializes the primary database `abonstock_db` (see `.env.example`).
+
+3. Ensure the isolated test database exists in the container:
+   Check whether `abonstock_test_db` already exists before running creation:
+   ```bash
+   docker exec abonstock-postgres psql -U abonstock -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'abonstock_test_db';"
+   ```
+   - If output is `1`: The database is already present. Do not run `createdb`.
+   - If output is empty: The database does not yet exist; create it via:
+     ```bash
+     docker exec -i abonstock-postgres createdb -U abonstock abonstock_test_db
+     ```
+   - If the check command fails: Stop and inspect container and PostgreSQL status (`docker ps`). Do not attempt to drop or recreate any database.
+
+   > [!NOTE]
+   > **Database Roles & Isolation:**
+   > - **`abonstock_db` (Baseline / Demo Environment):** Created automatically by Docker Compose (`POSTGRES_DB`), holding verified demo baseline data. Never run migrations, seeding, or test suites against this database.
+   > - **`abonstock_test_db` (Dedicated Isolated Database):** The isolated database for automated tests, migration testing, and safe local onboarding.
 
 ---
 
@@ -231,17 +248,20 @@ To defend against insecure deployments, `src/AbonStock.Api` implements a **fail-
 
 Environment variables must be configured in the active terminal session used to launch the API or execute migrations. These session-scoped environment variables exist in process memory only and are never committed to version control.
 
+> [!IMPORTANT]
+> **Terminal Session Scope:** Environment variables set via `$env:...` (PowerShell) or `export ...` (Bash) exist in process memory only for that specific terminal session. Opening a new terminal window creates an isolated session where these variables are not set. Any new terminal executing EF Core migrations or running the API must have these variables configured.
+
 > [!TIP]
 > For comprehensive full-stack setup, dynamic secret generation, database isolation safety gates, and end-to-end troubleshooting, refer to the [Safe Local Development Guide](docs/local-development.md).
 
-> [!IMPORTANT]
+> [!CAUTION]
 > **Database Isolation Guard:**
 > Never execute migrations, seed operations, or test runs against the operational database `abonstock_db`. For local development and test execution, configure your connection string to target the dedicated test database (`abonstock_test_db`).
 
 **PowerShell:**
 ```powershell
 # 1. Set database connection string targeting the isolated test database
-$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+$env:ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
 
 # 2. Generate a dynamic 256-bit cryptographically secure JWT signing key for this session
 $env:Jwt__SecretKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
@@ -253,7 +273,7 @@ $env:Auth__DefaultPassword = "<choose_a_strong_local_password>"
 **Bash:**
 ```bash
 # 1. Set database connection string targeting the isolated test database
-export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
 
 # 2. Generate a dynamic 256-bit secure JWT signing key
 export Jwt__SecretKey=$(openssl rand -base64 32)
@@ -263,7 +283,7 @@ export Auth__DefaultPassword="<choose_a_strong_local_password>"
 ```
 
 > [!NOTE]
-> The `<choose_a_strong_local_password>` and `<your_local_pg_password>` placeholders must be replaced with your actual chosen passwords before execution; they are not working credentials. If `$env:Auth__DefaultPassword` is omitted, the API will start safely but all login attempts will return HTTP 401 Unauthorized as a security safeguard. Never commit real secrets or production connection strings to version control.
+> The `<choose_a_strong_local_password>` and `YOUR_LOCAL_PG_PASSWORD` placeholders must be replaced with your actual chosen passwords before execution; they are not working credentials. Replace `YOUR_LOCAL_PG_PASSWORD` with your local PostgreSQL password. If `$env:Auth__DefaultPassword` is omitted, the API will start safely but all login attempts will return HTTP 401 Unauthorized as a security safeguard. Never commit real secrets or production connection strings to version control.
 
 ---
 
@@ -282,7 +302,7 @@ export Auth__DefaultPassword="<choose_a_strong_local_password>"
    **PowerShell:**
    ```powershell
    # 1. Set connection string targeting your isolated test database
-   $env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+   $env:ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
 
    # 2. Apply EF Core migrations to the isolated database
    dotnet ef database update --project src/AbonStock.Api
@@ -291,7 +311,7 @@ export Auth__DefaultPassword="<choose_a_strong_local_password>"
    **Bash:**
    ```bash
    # 1. Set connection string targeting your isolated test database
-   export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+   export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
 
    # 2. Apply EF Core migrations to the isolated database
    dotnet ef database update --project src/AbonStock.Api

@@ -16,15 +16,27 @@ Ensure the following configuration is supplied via environment variables before 
 
 ---
 
-### Step 1: Start PostgreSQL Container
-Start the local PostgreSQL 16 Alpine container via Docker Compose:
-```bash
-docker compose up -d
-```
-Verify the container is healthy:
-```bash
-docker ps --filter "name=abonstock-postgres"
-```
+### Step 1: Start PostgreSQL Container & Verify Test Database
+1. Start the local PostgreSQL 16 Alpine container via Docker Compose:
+   ```bash
+   docker compose up -d
+   ```
+2. Verify the container is healthy:
+   ```bash
+   docker ps --filter "name=abonstock-postgres"
+   ```
+3. Ensure the isolated test database exists in the container:
+   Check whether `abonstock_test_db` already exists before running creation:
+   ```bash
+   docker exec abonstock-postgres psql -U abonstock -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'abonstock_test_db';"
+   ```
+   - If output is `1`: The database is already present. Do not run `createdb`.
+   - If output is empty: The database does not yet exist; create it via:
+     ```bash
+     docker exec -i abonstock-postgres createdb -U abonstock abonstock_test_db
+     ```
+   - If the check command fails: Stop and inspect container and PostgreSQL status (`docker ps`). Do not attempt to drop or recreate any database.
+   *(Docker Compose initializes `abonstock_db` on boot; this step ensures the isolated `abonstock_test_db` is available before running walkthrough migrations or tests).*
 
 ---
 
@@ -34,10 +46,21 @@ In **Terminal 1**:
 > [!WARNING]
 > **Database Safety:** Always target an isolated database (such as `abonstock_test_db`) during walkthroughs and testing. Never run migrations, seeding, or automated test suites against `abonstock_db` if it holds existing operational or demo baseline records.
 
+> [!IMPORTANT]
+> **Terminal Session Scope:** Environment variables set via `$env:...` (PowerShell) or `export ...` (Bash) exist in process memory only for that specific terminal session. Opening a new terminal window creates an isolated session where these variables are not set. Any new terminal executing EF Core migrations or running the API must have these variables configured.
+
+> [!IMPORTANT]
+> **Schema & Demo Data Prerequisites for Walkthrough:**
+> A freshly created `abonstock_test_db` contains no schema tables or initial records. The walkthrough steps in this runbook rely on baseline catalog items (e.g. `ABON-SAPI-ORI-100`) and demo batches.
+> Before starting the API for the walkthrough, ensure `abonstock_test_db` is initialized:
+> 1. **Apply Migrations:** Run EF Core database update to create tables in `abonstock_test_db`: `dotnet ef database update --project src/AbonStock.Api`.
+> 2. **Seed Demo Records:** Enable the built-in idempotent seeder (`AbonStockDataSeeder`) by setting `Seeding__AutoSeed="true"` during initial startup.
+> Never assume that creating `abonstock_test_db` via `createdb` automatically generates schema tables or demo data.
+
 **PowerShell:**
 ```powershell
 # 1. Supply your local PostgreSQL connection string (targeting isolated test database)
-$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+$env:ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
 
 # 2. Generate a dynamic 256-bit cryptographically secure JWT signing key for this session
 $env:Jwt__SecretKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
@@ -45,16 +68,20 @@ $env:Jwt__SecretKey = [Convert]::ToBase64String([System.Security.Cryptography.Ra
 # 3. Configure a chosen local password for demo users (admin, staff) in this session
 $env:Auth__DefaultPassword = "<choose_a_strong_local_password>"
 
-# Optional: Enable idempotent demo data seeder if starting with an empty database
-# $env:Seeding__AutoSeed = "true"
+# 4. Enable idempotent demo data seeder on initial run with empty database
+$env:Seeding__AutoSeed = "true"
 
+# 5. Apply EF Core schema migrations (if not yet applied to abonstock_test_db)
+dotnet ef database update --project src/AbonStock.Api
+
+# 6. Start the Web API
 dotnet run --project src/AbonStock.Api --launch-profile http
 ```
 
 **Bash:**
 ```bash
 # 1. Supply your local PostgreSQL connection string (targeting isolated test database)
-export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
 
 # 2. Generate a dynamic 256-bit secure JWT signing key
 export Jwt__SecretKey=$(openssl rand -base64 32)
@@ -62,9 +89,13 @@ export Jwt__SecretKey=$(openssl rand -base64 32)
 # 3. Configure a chosen local password for demo users
 export Auth__DefaultPassword="<choose_a_strong_local_password>"
 
-# Optional: Enable idempotent demo data seeder
-# export Seeding__AutoSeed="true"
+# 4. Enable idempotent demo data seeder on initial run with empty database
+export Seeding__AutoSeed="true"
 
+# 5. Apply EF Core schema migrations (if not yet applied to abonstock_test_db)
+dotnet ef database update --project src/AbonStock.Api
+
+# 6. Start the Web API
 dotnet run --project src/AbonStock.Api --launch-profile http
 ```
 
@@ -82,17 +113,17 @@ The Web API starts listening at `http://localhost:5299`.
 >   **PowerShell:**
 >   ```powershell
 >   # Set connection string targeting your isolated test database
->   $env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+>   $env:ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
 >   dotnet ef database update --project src/AbonStock.Api
 >   ```
 >
 >   **Bash:**
 >   ```bash
 >   # Set connection string targeting your isolated test database
->   export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+>   export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
 >   dotnet ef database update --project src/AbonStock.Api
 >   ```
->   *(Replace `<your_local_pg_password>` locally; never paste real credentials into public documentation. Always verify the resolved database name before applying migrations).*
+>   *(Replace `YOUR_LOCAL_PG_PASSWORD` with your local PostgreSQL password; never paste real credentials into public documentation. Always verify the resolved database name before applying migrations).*
 
 ---
 

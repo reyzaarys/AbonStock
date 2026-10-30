@@ -25,10 +25,15 @@ A complete local AbonStock deployment runs three decoupled services:
 
 | Service | Host Port | Protocol / Path | Process Type |
 | :--- | :---: | :--- | :--- |
-| **PostgreSQL 16** | `5432` | TCP / `abonstock_db` | Docker Container (`abonstock-postgres`) |
+| **PostgreSQL 16** | `5432` | TCP (`abonstock_db`, `abonstock_test_db`) | Docker Container (`abonstock-postgres`) |
 | **ASP.NET Core API** | `5299` | HTTP / `http://localhost:5299` | .NET Kestrel Server (`launch-profile http`) |
 | **Swagger UI** | `5299` | HTTP / `http://localhost:5299/swagger` | OpenAPI Interface |
 | **React Frontend** | `5173` | HTTP / `http://localhost:5173` | Vite Dev Server (`localhost:5173`) |
+
+> [!NOTE]
+> **Database Role Distinction:**
+> - **`abonstock_db` (Baseline / Demo Environment):** The default database created automatically by Docker Compose (`POSTGRES_DB`), containing verified baseline demo data (products, batches, and orders). Never execute migrations, seed operations, or test runs against this database.
+> - **`abonstock_test_db` (Dedicated Isolated Database):** The isolated database used for automated tests, migration verification, and safe onboarding experiments. All onboarding examples and integration test suites strictly target this database.
 
 ---
 
@@ -39,19 +44,24 @@ To comply with enterprise security standards, AbonStock separates base configura
 - Secrets are supplied at runtime via environment variables or User Secrets, ensuring credentials are never committed to version control.
 - `Program.cs` implements a **fail-fast startup check**: the API refuses to start (`InvalidOperationException`) if `Jwt:SecretKey` contains `"PLACEHOLDER"`, `"YOUR_JWT"`, or is under 32 bytes (256 bits for HS256).
 
-### A. Dynamic Secret Generation (PowerShell)
-Instead of reusing fixed strings, generate a fresh cryptographically secure random signing key in your active terminal session using .NET's built-in `RandomNumberGenerator`:
+### A. Dynamic Secret Generation
+Instead of reusing fixed strings, generate a fresh cryptographically secure random signing key in your active terminal session:
 
+**PowerShell:**
 ```powershell
 # Generate 32 cryptographically random bytes encoded as Base64 (44 characters / 256 bits)
-$jwtKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-
-# Assign to active PowerShell session (held in process memory only)
-$env:Jwt__SecretKey = $jwtKey
+$env:Jwt__SecretKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 ```
 
-> [!NOTE]
-> Environment variables set via `$env:NAME = ...` persist only for the lifetime of that specific terminal session. Restarting or opening a new terminal requires re-running these commands.
+**Bash:**
+```bash
+# Generate 32 cryptographically random bytes encoded as Base64
+export Jwt__SecretKey=$(openssl rand -base64 32)
+```
+
+> [!IMPORTANT]
+> **Terminal Session Persistence:**
+> Environment variables set via `$env:NAME = ...` (PowerShell) or `export NAME=...` (Bash) exist in process memory only for the lifetime of that specific terminal session. Opening a new terminal window creates an isolated session where these variables are not set. Any new terminal executing EF Core migrations or running the API must have these variables configured.
 
 ### B. Demo-User Password Configuration
 The backend authenticates demo users (`admin` and `staff`) against salted PBKDF2 password hashes. In `AuthService.cs`, configuration lookup adheres to the following precedence:
@@ -59,20 +69,39 @@ The backend authenticates demo users (`admin` and `staff`) against salted PBKDF2
 2. `Auth:DefaultPassword` (e.g. `Auth__DefaultPassword`)
 
 Set a chosen local password for your terminal session:
+
+**PowerShell:**
 ```powershell
 $env:Auth__DefaultPassword = "<choose_a_strong_local_password>"
 ```
-*(If no password is provided in configuration or environment variables, `AuthService` sets an empty hash and rejects all login attempts with `401 Unauthorized` as a fail-safe).*
+
+**Bash:**
+```bash
+export Auth__DefaultPassword="<choose_a_strong_local_password>"
+```
+
+*(The `<choose_a_strong_local_password>` placeholder must be replaced with your chosen local password before running. If omitted, `AuthService` sets an empty hash and rejects all login attempts with `401 Unauthorized` as a fail-safe).*
 
 ### C. Database Connection String Configuration
-Supply the connection string matching your local PostgreSQL container instance:
+Configure the connection string in your active terminal session to target the dedicated test database (`abonstock_test_db`). Replace `YOUR_LOCAL_PG_PASSWORD` with your local PostgreSQL password:
+
+**PowerShell:**
 ```powershell
-$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=<your_local_pg_password>"
+$env:ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
 ```
+
+**Bash:**
+```bash
+export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
+```
+
+> [!WARNING]
+> **Database Isolation Guard:**
+> The API `appsettings.json` defaults to `Database=abonstock_db` with a placeholder password. If you omit `$env:ConnectionStrings__DefaultConnection`, EF Core CLI or the API will fall back to `abonstock_db`. Always set the connection string to `abonstock_test_db` in your active terminal session to protect the baseline demo database.
 
 ---
 
-## 3. Database Credentials & Persistent Volume Warning
+## 3. Database Credentials, Multi-Database Topology & Persistent Volume Warning
 
 Reviewing `docker-compose.yml`:
 ```yaml
@@ -87,6 +116,22 @@ services:
     volumes:
       - abonstock_pgdata:/var/lib/postgresql/data
 ```
+
+### PostgreSQL Multi-Database Architecture:
+1. **`abonstock_db` (Default Development/Demo Baseline):**
+   The official PostgreSQL container initializes the database defined in `POSTGRES_DB` (`abonstock_db`) on first startup. This database serves as the baseline demo environment. Never run migrations, seeding, or automated test suites against `abonstock_db`.
+2. **`abonstock_test_db` (Dedicated Isolated Database):**
+   Because PostgreSQL only creates one database at initial boot, verify and create `abonstock_test_db` on the running container before running isolated migrations:
+   ```bash
+   # Check whether abonstock_test_db exists (returns 1 if exists, empty if absent):
+   docker exec abonstock-postgres psql -U abonstock -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'abonstock_test_db';"
+   ```
+   - If output is `1`: The database is already present. Do not run `createdb`.
+   - If output is empty: The database does not yet exist; create it via:
+     ```bash
+     docker exec -i abonstock-postgres createdb -U abonstock abonstock_test_db
+     ```
+   - If the check command fails: Stop and inspect container and PostgreSQL status (`docker ps`). Do not attempt to drop or recreate any database.
 
 > [!WARNING]
 > **PostgreSQL Volume Initialization Rule:**
@@ -103,16 +148,19 @@ Before running any mutating database command (applying migrations or enabling th
 │                   DATABASE ISOLATION SAFETY GATE                       │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 1. Confirm target host is strictly localhost (127.0.0.1:5432).         │
-│ 2. Confirm database name is dedicated to development (abonstock_db).   │
-│ 3. Confirm the database contains NO production or irreplaceable data.  │
+│ 2. Confirm database name is dedicated to test/isolation                │
+│    (abonstock_test_db), NOT operational/demo baseline (abonstock_db).  │
+│ 3. Confirm you never run migrations, seeding, or test writes on        │
+│    the baseline database (abonstock_db).                               │
 │ 4. If target isolation cannot be established: STOP IMMEDIATELY.        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 These operations represent distinct lifecycle phases:
 - **Starting the PostgreSQL Container:** Starts the database engine daemon only.
-- **Applying EF Core Migrations:** Creates or updates schema tables and constraints (`dotnet ef database update`).
-- **Seeding Demo Data:** Populates sample products, batches, and orders (explicit opt-in via `Seeding__AutoSeed="true"`).
+- **Ensuring Test Database Exists:** Creates `abonstock_test_db` via `createdb` if absent.
+- **Applying EF Core Migrations:** Creates or updates schema tables and constraints on `abonstock_test_db` (`dotnet ef database update`).
+- **Seeding Demo Data:** Populates sample products, batches, and orders (explicit opt-in via `Seeding__AutoSeed="true"`, disposable test DB only).
 - **Starting the Web API:** Boots the HTTP pipeline and begins listening for requests.
 - **Starting the Frontend:** Compiles and serves the React client SPA.
 
@@ -122,45 +170,74 @@ These operations represent distinct lifecycle phases:
 
 ### Terminal 1: Database & Backend Web API
 
-#### Step 1: Open PowerShell and Launch PostgreSQL
-```powershell
-# 1. Navigate to repository root
-cd C:\Users\trans\Downloads\Upwork
-
-# 2. Start PostgreSQL container in background
+#### Step 1: Launch PostgreSQL & Ensure Test Database Exists
+```bash
+# 1. Start PostgreSQL container in background
 docker compose up -d
 
-# 3. Confirm container is healthy and listening on port 5432
+# 2. Confirm container is healthy and listening on port 5432
 docker ps --filter "name=abonstock-postgres"
+
+# 3. Check if isolated test database exists before createdb:
+docker exec abonstock-postgres psql -U abonstock -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'abonstock_test_db';"
+# If output is 1: database is ready (do not run createdb).
+# If output is empty: create via:
+# docker exec -i abonstock-postgres createdb -U abonstock abonstock_test_db
+# If check fails: stop and verify container status. Never drop/recreate databases.
 ```
 
 #### Step 2: Configure Session Secrets
+Session environment variables must be configured in the active terminal session.
+
+> [!IMPORTANT]
+> **Terminal Session Scope:** Environment variables exist in process memory only for that specific terminal session. Opening a new terminal window creates an isolated session where these variables are not set. If you open a separate terminal for EF Core CLI or running the API, you must set these variables again in that new terminal session.
+
+**PowerShell:**
 ```powershell
-# Generate dynamic 256-bit JWT signing key
+# 1. Supply connection string targeting the isolated test database
+$env:ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
+
+# 2. Generate dynamic 256-bit cryptographically secure JWT signing key for this session
 $env:Jwt__SecretKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 
-# Configure demo user password for this session
+# 3. Configure demo user password for this session
 $env:Auth__DefaultPassword = "<choose_a_strong_local_password>"
+```
 
-# Configure local development connection string
-$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=abonstock_dev_pass_2026"
+**Bash:**
+```bash
+# 1. Supply connection string targeting the isolated test database
+export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=YOUR_LOCAL_PG_PASSWORD"
+
+# 2. Generate dynamic 256-bit secure JWT signing key
+export Jwt__SecretKey=$(openssl rand -base64 32)
+
+# 3. Configure demo user password for this session
+export Auth__DefaultPassword="<choose_a_strong_local_password>"
 ```
 
 #### Step 3: Apply Database Migrations (After Safety Gate)
-Confirm the target database is your dedicated local `abonstock_db`, then apply EF Core migrations:
-```powershell
+Confirm the target database is your isolated `abonstock_test_db`, then apply EF Core migrations:
+```bash
 dotnet ef database update --project src/AbonStock.Api
 ```
 
-#### Step 4: (Optional) Opt-in to Demo Data Seeding
-`Seeding:AutoSeed` is disabled (`false`) by default. If starting with an empty database and you wish to populate demo products and batches:
+#### Step 4: (Optional) Opt-in to Demo Data Seeding (Disposable Test DB Only)
+`Seeding:AutoSeed` is disabled (`false`) by default. If starting with an empty test database and you wish to populate demo products and batches:
+
+**PowerShell:**
 ```powershell
 $env:Seeding__AutoSeed = "true"
+```
+
+**Bash:**
+```bash
+export Seeding__AutoSeed="true"
 ```
 *(The seeder is idempotent and acquires PostgreSQL transaction advisory locks to guarantee safety).*
 
 #### Step 5: Start the Web API
-```powershell
+```bash
 dotnet run --project src/AbonStock.Api --launch-profile http
 ```
 The API is now running at `http://localhost:5299`.
@@ -171,8 +248,8 @@ The API is now running at `http://localhost:5299`.
 ### Terminal 2: React Frontend Application
 
 #### Step 1: Open Terminal 2 and Configure Environment
-```powershell
-cd C:\Users\trans\Downloads\Upwork\frontend
+```bash
+cd frontend
 
 # Ensure local environment file is created
 cp .env.example .env
@@ -183,12 +260,12 @@ VITE_API_BASE_URL=http://localhost:5299
 ```
 
 #### Step 2: Install Dependencies & Launch Vite
-```powershell
+```bash
 # Install packages
-pnpm install   # or npm install
+npm install   # or pnpm install
 
 # Launch Vite development server
-pnpm dev       # or npm run dev
+npm run dev   # or pnpm dev
 ```
 The frontend is now accessible at `http://localhost:5173`.
 - Open `http://localhost:5173` in your browser.
@@ -205,9 +282,11 @@ To verify all components without modifying any business records:
    - Execute `POST /api/auth/login` using your configured credentials. Confirm a signed JWT token is returned.
    - Execute `GET /api/auth/me` with `Bearer <token>` in the Authorize dialog. Confirm your profile claims are returned.
 3. **Frontend UI Health:** Navigate to `http://localhost:5173`. Confirm unauthenticated requests redirect cleanly to `/login`, and logging in reveals the Navbar with your display name and role badge.
-4. **Automated Unit Tests:**
-   - Backend: `dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj --filter FullyQualifiedName~Unit` (96 passed, 0 database calls).
-   - Frontend: `cd frontend; pnpm test` (41 passed, mock fetch).
+4. **Automated Unit & Integration Tests:**
+   - Backend Unit Subset: `dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj --filter FullyQualifiedName~Unit` (140 passed via in-memory runner, 0 database calls).
+   - Backend Integration Subset: `dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj --filter FullyQualifiedName~Integration` (112 passed against `abonstock_test_db`).
+   - Frontend Unit Tests: `cd frontend; npm test` (68 passed via native Node.js test runner).
+   - Full Solution Verification: 320 passed across separate backend (252) and frontend (68) suites.
 
 ---
 
@@ -215,11 +294,11 @@ To verify all components without modifying any business records:
 
 | Symptom / Error | Root Cause | Verified Resolution |
 | :--- | :--- | :--- |
-| **Startup Crash:** `InvalidOperationException: Jwt:SecretKey must be configured...` | Missing, placeholder, or short JWT signing key. | Generate a key using `[Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))` and assign to `$env:Jwt__SecretKey`. |
+| **Startup Crash:** `InvalidOperationException: Jwt:SecretKey must be configured...` | Missing, placeholder, or short JWT signing key. | Generate a key using `[Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))` and assign to `$env:Jwt__SecretKey` or `export Jwt__SecretKey`. |
 | **Startup Crash:** `Npgsql.NpgsqlException: Connection refused` | PostgreSQL container is stopped or port 5432 is not exposed. | Run `docker compose up -d` and check `docker ps` to ensure the container is running and healthy. |
-| **Database Error:** `28P01: password authentication failed for user "abonstock"` | Mismatch between connection string password and the password set when the persistent volume was created. | Check `.env.example` defaults or verify the password configured during initial volume creation. Do not delete volumes containing needed data. |
-| **Login returns `401 Unauthorized`:** `"Invalid username or password."` | `Auth__DefaultPassword` was not set in the terminal before running the API. | Set `$env:Auth__DefaultPassword` to your chosen password and restart the backend. |
+| **Database Error:** `28P01: password authentication failed for user "abonstock"` | Mismatch between connection string password and the password set when the persistent volume was created. | Check `.env.example` defaults or verify the password configured during initial volume creation (`POSTGRES_PASSWORD`). Replace `YOUR_LOCAL_PG_PASSWORD` with that exact value. Do not delete volumes containing needed data. |
+| **Login returns `401 Unauthorized`:** `"Invalid username or password."` | `Auth__DefaultPassword` was not set in the terminal before running the API. | Set `$env:Auth__DefaultPassword` (or `export Auth__DefaultPassword`) to your chosen password and restart the backend. |
 | **Frontend displays network error:** `Unable to connect to backend at http://localhost:5299` | Backend API is not running or listening on a different port. | Verify Terminal 1 is running `dotnet run --project src/AbonStock.Api --launch-profile http` and reachable at `http://localhost:5299`. |
 | **CORS console error:** `Access-Control-Allow-Origin blocked` | Frontend launched on a non-standard origin port. | Ensure Vite runs on port 5173 (standard dev port allowed in `appsettings.Development.json`). |
 | **HTTP `401 Unauthorized` on all Swagger endpoints** | Token was omitted or not prefixed with `Bearer `. | Enter `Bearer <token>` (with space) into the Swagger Authorize dialog. |
-| **Database table not found error:** `relation "Products" does not exist` | EF Core migrations have not yet been applied to the database. | Run `dotnet ef database update --project src/AbonStock.Api` after confirming database isolation. |
+| **Database table not found error:** `relation "Products" does not exist` | EF Core migrations have not yet been applied to the isolated database. | Ensure `$env:ConnectionStrings__DefaultConnection` targets `abonstock_test_db` in your active terminal, then run `dotnet ef database update --project src/AbonStock.Api`. |
