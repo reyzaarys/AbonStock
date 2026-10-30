@@ -11,6 +11,17 @@
 
 A full-stack, concurrent-safe inventory tracking and order fulfillment platform engineered for artisanal food manufacturers (specifically Indonesian shredded meat / *Abon* producers). Built with an **ASP.NET Core 8 Web API**, **Entity Framework Core 8**, **PostgreSQL 16**, and a modern **React 18 + TypeScript + Vite** Single Page Application.
 
+> 📍 **Quick Navigation:**
+> - [1. Project Overview & Business Domain](#1-project-overview--business-domain)
+> - [2. Full-Stack Architecture](#2-full-stack-architecture)
+> - [3. Verified Features & Business Workflows](#3-verified-features--business-workflows)
+> - [4. Authentication & Role-Based Authorization](#4-authentication--role-based-authorization)
+> - [5. Prerequisites & Local Installation](#5-prerequisites--local-installation)
+> - [6. Running Automated Tests (320 Passed)](#6-running-automated-tests)
+> - [7. Verified Test Metrics](#7-verified-test-metrics-full-verification)
+> - [8. Technical & Security Limitations](#8-technical--security-limitations)
+> - [9. Documentation Directory & Portfolio Case Study](#9-documentation-directory)
+
 ---
 
 ## 1. Project Overview & Business Domain
@@ -22,8 +33,8 @@ Artisanal food manufacturing involves short shelf-life batches, strict quality c
 - **Inventory Expiration Waste:** Non-deterministic batch selection causing older batches to expire in the warehouse while newer inventory is shipped.
 
 **AbonStock** resolves these operational challenges through a concurrent-safe, auditable architecture:
-- **Strict FEFO/FIFO Allocation:** Customer orders reserve inventory deterministically from the earliest production batches (`ProductionDate ASC, Id ASC`).
-- **Pessimistic & Optimistic Concurrency:** Canonical PostgreSQL row-level locks (`SELECT ... FOR UPDATE`) prevent deadlocks, combined with PostgreSQL system column `xmin` concurrency tokens for stale read detection.
+- **Strict FEFO Allocation:** Customer orders reserve inventory deterministically from eligible batches ordered by `ExpiryDate ASC, ProductionDate ASC, Id ASC`.
+- **Pessimistic & Optimistic Concurrency:** Canonical PostgreSQL row-level locks (`SELECT ... FOR UPDATE`) mitigate circular-wait deadlocks, combined with PostgreSQL system column `xmin` concurrency tokens for stale read detection.
 - **Database-Level Double-Deduction Prevention:** Application-level order state guards reinforced by a PostgreSQL partial unique index on `StockMovements`.
 - **Immutable Stock Ledger:** Every physical adjustment or fulfillment writes an immutable movement record with before/after balances for both the individual batch and aggregate product inventory.
 - **Role-Based Security:** Enterprise JWT Bearer authentication enforcing distinct operational permissions for **Administrator** and **Warehouse Staff** roles across both backend endpoints and frontend interfaces.
@@ -83,8 +94,8 @@ AbonStock/
 ├── tests/
 │   └── AbonStock.Tests/             # Automated test suite (xUnit)
 │       ├── Common/                  # Test fixtures & ordering helpers
-│       ├── Integration/             # 73 PostgreSQL database integration tests
-│       └── Unit/                    # 96 in-memory unit tests (Auth, RBAC, CORS, Domain)
+│       ├── Integration/             # PostgreSQL database integration test suite
+│       └── Unit/                    # In-memory unit and domain test suite (Auth, RBAC, CORS, Domain, FEFO)
 └── frontend/                        # React 18 + TypeScript + Vite Single Page Application
     ├── .env.example                 # Frontend environment template (VITE_API_BASE_URL)
     ├── .gitignore                   # Ignore rules for node_modules, dist, and local .env
@@ -133,14 +144,14 @@ AbonStock/
 
 ### E. Order Lifecycle, Deterministic FEFO Allocation & Deep Inspection
 - **Creation (`Pending`):** Draft orders calculate line items and totals server-side; no stock is locked or reserved at draft creation.
-- **Confirmation (`Confirmed`):** Atomically evaluates eligible `Released` batches using strict FEFO (`ProductionDate ASC, Id ASC`), acquires pessimistic row locks (`FOR UPDATE`), and creates `OrderReservation` records.
+- **Confirmation (`Confirmed`):** Acquires pessimistic row locks on candidate `Released` batches in primary-key order (`ORDER BY "Id" ASC FOR UPDATE`), deterministically allocates reservations in memory using strict FEFO (`FefoAllocationHelper`), and creates `OrderReservation` records.
 - **Cancellation (`Cancelled`):** Atomically rolls back reservations without losing audit continuity.
 - **Fulfillment (`Completed`):** Atomically deducts physical stock, clears reservations, transitions status to `Completed`, and writes immutable `OrderDeduction` entries to `StockMovements`.
 - **Order Detail Inspection & Ledger Navigation:** Full modal transparency for any order status with SKU itemization, unit price, quantity, line total, order total, conditional completion/cancellation timestamps, and contextual one-click navigation to the Stock Movements ledger (`/inventory?tab=movements`).
 
 ### F. Concurrency & Idempotency Safeguards
 - **PostgreSQL `xmin` Optimistic Concurrency:** System column `xmin` mapped to entity versions (`uint Version`), detecting concurrent stale updates with `409 Conflict`.
-- **Three-Tier Canonical Lock Hierarchy:** Deterministic locking sequence (`Orders` $\rightarrow$ `InventoryBatches` $\rightarrow$ `Products`) guarantees circular deadlocks cannot occur.
+- **Three-Tier Canonical Lock Hierarchy:** `OrderService` uses a consistent resource-locking hierarchy (`Orders` $\rightarrow$ `InventoryBatches` $\rightarrow$ `Products`) and deterministic primary-key ordering (`ORDER BY "Id" ASC`) for batch and product locks to mitigate circular-wait deadlock risk across its coordinated transaction paths. FEFO allocation ordering is applied separately in memory through `FefoAllocationHelper.SelectAndOrderEligibleBatches`.
 - **Database-Level Partial Unique Index:**
   ```sql
   CREATE UNIQUE INDEX "IX_StockMovements_Order_Batch_Deduction"
@@ -196,7 +207,7 @@ The application uses ASP.NET Core JWT Bearer authentication with an enforced `Fa
 ### Prerequisites
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (v8.0.x or higher)
 - [Node.js](https://nodejs.org/) (v18.0.0 or higher; v20+ recommended)
-- Package Manager: `pnpm` (recommended) or `npm`
+- Package Manager: `npm` (bundled with Node.js) or `pnpm`
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine
 - PowerShell 7+ or Bash terminal
 
@@ -223,10 +234,14 @@ Environment variables must be configured in the active terminal session used to 
 > [!TIP]
 > For comprehensive full-stack setup, dynamic secret generation, database isolation safety gates, and end-to-end troubleshooting, refer to the [Safe Local Development Guide](docs/local-development.md).
 
+> [!IMPORTANT]
+> **Database Isolation Guard:**
+> Never execute migrations, seed operations, or test runs against the operational database `abonstock_db`. For local development and test execution, configure your connection string to target the dedicated test database (`abonstock_test_db`).
+
 **PowerShell:**
 ```powershell
-# 1. Set database connection string (replace placeholder with your local PostgreSQL password)
-$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=<your_local_pg_password>"
+# 1. Set database connection string targeting the isolated test database
+$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
 
 # 2. Generate a dynamic 256-bit cryptographically secure JWT signing key for this session
 $env:Jwt__SecretKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
@@ -237,8 +252,8 @@ $env:Auth__DefaultPassword = "<choose_a_strong_local_password>"
 
 **Bash:**
 ```bash
-# 1. Set database connection string (replace placeholder with your local PostgreSQL password)
-export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=<your_local_pg_password>"
+# 1. Set database connection string targeting the isolated test database
+export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
 
 # 2. Generate a dynamic 256-bit secure JWT signing key
 export Jwt__SecretKey=$(openssl rand -base64 32)
@@ -254,14 +269,36 @@ export Auth__DefaultPassword="<choose_a_strong_local_password>"
 
 ### Step 3: Apply Database Migrations & Seed Demo Data
 
-1. **Apply Migrations:**
-   Migrations are never executed automatically at startup. Ensure `$env:ConnectionStrings__DefaultConnection` is configured in your active terminal session, then apply migrations using EF Core CLI:
-   ```bash
+> [!CAUTION]
+> **Database Migration Safety Rules:**
+> 1. **Target Verification:** Always verify the target database name in your connection string before applying migrations. Migrations must explicitly target an isolated database such as `abonstock_test_db`.
+> 2. **Protect Baseline Data:** Never run migration or seeding commands against `abonstock_db` if it contains baseline or demo data.
+> 3. **Credential Safety:** Replace the connection string placeholder locally in your active terminal; never commit or paste real credentials into public repositories or documentation.
+> 4. **Disable Seeding by Default:** Keep `Seeding:AutoSeed=false` unless intentionally populating a fresh, disposable test database.
+
+1. **Apply Migrations to the Isolated Test Database:**
+   Migrations are never executed automatically at startup. The API `appsettings.json` defaults to `Database=abonstock_db`, so you must explicitly set the connection string in your active terminal session to target your isolated database (`abonstock_test_db`) before running EF Core CLI:
+
+   **PowerShell:**
+   ```powershell
+   # 1. Set connection string targeting your isolated test database
+   $env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+
+   # 2. Apply EF Core migrations to the isolated database
    dotnet ef database update --project src/AbonStock.Api
    ```
 
-2. **Database Seeding (Explicit Opt-In):**
-   `Seeding:AutoSeed` is set to `false` by default in `appsettings.json`. If you wish to populate demo products, batches, and orders on initial launch, set the opt-in flag:
+   **Bash:**
+   ```bash
+   # 1. Set connection string targeting your isolated test database
+   export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+
+   # 2. Apply EF Core migrations to the isolated database
+   dotnet ef database update --project src/AbonStock.Api
+   ```
+
+2. **Database Seeding (Explicit Opt-In for Disposable Test DB Only):**
+   `Seeding:AutoSeed` is set to `false` by default in `appsettings.json`. If you wish to populate demo products, batches, and orders on initial launch on your dedicated, disposable test database, opt in explicitly in that session:
    ```powershell
    $env:Seeding__AutoSeed = "true"
    ```
@@ -288,10 +325,10 @@ cd frontend
 cp .env.example .env
 
 # 2. Install dependencies
-pnpm install   # or npm install
+npm install   # or pnpm install
 
 # 3. Start development server
-pnpm dev       # or npm run dev
+npm run dev   # or pnpm dev
 ```
 The web application is accessible at `http://localhost:5173`.
 - Authenticate using the configured demo accounts (`admin` or `staff` with your configured password).
@@ -302,30 +339,37 @@ The web application is accessible at `http://localhost:5173`.
 
 The repository contains automated unit and integration test suites:
 
-### 1. Run Backend Unit Tests (In-Memory / Fast)
-Executes 96 in-memory unit tests covering authentication, RBAC, domain validations, CORS configuration, and startup safety guards:
+### 1. Run Complete Backend Test Suite
+Executes the complete backend test suite, combining both in-memory unit tests and PostgreSQL integration tests:
+```bash
+dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj
+```
+*(Requires active PostgreSQL container since integration tests are included; `PostgresTestFixture` automatically validates that integration tests target `abonstock_test_db`).*
+
+### 2. Run Backend Unit Tests (In-Memory Subset)
+Runs only the in-memory unit test subset (isolated from database dependencies), covering authentication, RBAC, domain invariants, CORS configuration, FEFO allocation helpers, and startup safety guards:
 ```bash
 dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj --filter FullyQualifiedName~Unit
 ```
 
-### 2. Run Frontend Unit Tests (Node.js Native Test Runner)
-Executes 68 frontend unit and domain tests covering authentication, order details & totals calculation, ledger routing, inventory quarantine/write-off/audit services, and API client error mapping:
-```bash
-cd frontend
-pnpm test     # or npm test
-```
-
-### 3. Run Frontend Type Check & Production Build
-```bash
-cd frontend
-pnpm exec tsc -b
-pnpm run build
-```
-
-### 4. Run PostgreSQL Integration Tests (Requires Active PostgreSQL)
-*Note: The 73 database integration tests run against a dedicated test database (`abonstock_test_db`). Ensure PostgreSQL is running before executing:*
+### 3. Run PostgreSQL Integration Tests (Integration Subset)
+Runs only the PostgreSQL database integration test subset, verifying live database transactions, row-level concurrency locking, reservation lifecycles, and double-deduction prevention against the dedicated test database (`abonstock_test_db`):
 ```bash
 dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj --filter FullyQualifiedName~Integration
+```
+*(Requires active PostgreSQL container on port 5432).*
+
+### 4. Run Frontend Unit Tests (Node.js Native Test Runner)
+Executes frontend unit and domain tests covering authentication, order details & totals calculation, ledger routing, inventory quarantine/write-off/audit services, and API client error mapping:
+```bash
+cd frontend
+npm test     # or pnpm test
+```
+
+### 5. Run Frontend Type Check & Production Build
+```bash
+cd frontend
+npm run build   # (executes tsc -b && vite build)
 ```
 
 ---
@@ -336,7 +380,7 @@ The following test counts are actively maintained and verified across the test s
 
 | Test Suite | Framework / Runner | Total Tests | Status | Scope |
 | :--- | :--- | :---: | :---: | :--- |
-| **Backend Automated Tests** | xUnit + `WebApplicationFactory` + PostgreSQL Fixture | **252** | **252 Passed (100%)** | Unit tests (FEFO, domain invariants, RBAC, DTO validation) & Integration tests (full database transactions, reservation lifecycle, double-deduction prevention) |
+| **Backend Automated Tests** | xUnit + `WebApplicationFactory` + PostgreSQL Fixture | **252** | **252 Passed (100%)** | 140 in-memory unit tests (FEFO, domain invariants, RBAC, DTO validation) & 112 PostgreSQL integration tests (full transactions, reservation lifecycle, double-deduction prevention) |
 | **Frontend Unit & Domain Tests** | Node.js Test Runner (`--experimental-strip-types`) | **68** | **68 Passed (100%)** | Bearer token injection, session restoration, role-aware UI logic, API client error mapping, order itemization & ledger routing, inventory audit & quarantine services |
 | **Total Full-Stack Verification** | **xUnit + Node.js Runner** | **320** | **320 Passed (100%)** | **Zero test failures across entire full-stack solution** |
 

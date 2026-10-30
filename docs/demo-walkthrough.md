@@ -31,10 +31,13 @@ docker ps --filter "name=abonstock-postgres"
 ### Step 2: Set Environment Variables & Start the Web API
 In **Terminal 1**:
 
+> [!WARNING]
+> **Database Safety:** Always target an isolated database (such as `abonstock_test_db`) during walkthroughs and testing. Never run migrations, seeding, or automated test suites against `abonstock_db` if it holds existing operational or demo baseline records.
+
 **PowerShell:**
 ```powershell
-# 1. Supply your local PostgreSQL connection string (see docker-compose.yml / .env.example)
-$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=<your_local_pg_password>"
+# 1. Supply your local PostgreSQL connection string (targeting isolated test database)
+$env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
 
 # 2. Generate a dynamic 256-bit cryptographically secure JWT signing key for this session
 $env:Jwt__SecretKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
@@ -50,8 +53,8 @@ dotnet run --project src/AbonStock.Api --launch-profile http
 
 **Bash:**
 ```bash
-# 1. Supply your local PostgreSQL connection string
-export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_db;Username=abonstock;Password=<your_local_pg_password>"
+# 1. Supply your local PostgreSQL connection string (targeting isolated test database)
+export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
 
 # 2. Generate a dynamic 256-bit secure JWT signing key
 export Jwt__SecretKey=$(openssl rand -base64 32)
@@ -72,7 +75,24 @@ The Web API starts listening at `http://localhost:5299`.
 - Confirm Swagger UI is accessible: open `http://localhost:5299/swagger`.
 
 > [!NOTE]
-> `Seeding:AutoSeed` is disabled (`false`) by default. If your database already contains tables and data from previous runs, do not enable seeding. Migrations must be applied using `dotnet ef database update --project src/AbonStock.Api`.
+> **Database Migration & Seeding Safety:**
+> - `Seeding:AutoSeed` is disabled (`false`) by default. Keep automatic seeding disabled unless intentionally setting up a disposable, isolated database. Never run migration or seeding commands against `abonstock_db` if it contains baseline or demo data.
+> - The API `appsettings.json` defaults to `Database=abonstock_db`. Migrations must explicitly target your isolated database (`abonstock_test_db`) by setting the connection string in the active terminal session before running EF Core CLI:
+>
+>   **PowerShell:**
+>   ```powershell
+>   # Set connection string targeting your isolated test database
+>   $env:ConnectionStrings__DefaultConnection = "Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+>   dotnet ef database update --project src/AbonStock.Api
+>   ```
+>
+>   **Bash:**
+>   ```bash
+>   # Set connection string targeting your isolated test database
+>   export ConnectionStrings__DefaultConnection="Host=localhost;Port=5432;Database=abonstock_test_db;Username=abonstock;Password=<your_local_pg_password>"
+>   dotnet ef database update --project src/AbonStock.Api
+>   ```
+>   *(Replace `<your_local_pg_password>` locally; never paste real credentials into public documentation. Always verify the resolved database name before applying migrations).*
 
 ---
 
@@ -85,8 +105,8 @@ cd frontend
 cp .env.example .env
 
 # Install dependencies and launch Vite development server
-pnpm install   # or npm install
-pnpm dev       # or npm run dev
+npm install   # or pnpm install
+npm run dev   # or pnpm dev
 ```
 
 The React frontend starts at `http://localhost:5173`.
@@ -453,4 +473,4 @@ Browser Flow:
 | **Frontend displays network error toast:** `Unable to connect to backend at http://localhost:5299` | Backend Web API is not running or running on an unexpected port. | Confirm backend is running via `dotnet run` on port `5299` and accessible via curl or browser. |
 | **CORS error in browser console:** `Origin http://localhost:5173 is not allowed by Access-Control-Allow-Origin` | Frontend URL does not match backend allowed origins. | Check `appsettings.Development.json` to ensure `http://localhost:5173` is listed under `Cors:AllowedOrigins`. |
 | **HTTP `401 Unauthorized` on all Swagger endpoints** | Token was not supplied to Swagger Authorize dialog. | Execute `POST /api/auth/login`, copy the token, click Authorize in Swagger, and enter `Bearer <token>`. |
-| **HTTP `404 Not Found` on database tables** | EF Core migrations have not been applied to the PostgreSQL database. | Run `dotnet ef database update --project src/AbonStock.Api` from the repository root. |
+| **HTTP `404 Not Found` on database tables** | EF Core migrations have not been applied to the isolated database. | Ensure `$env:ConnectionStrings__DefaultConnection` is set to target `abonstock_test_db` in your active terminal, verify the database name, and run `dotnet ef database update --project src/AbonStock.Api`. |

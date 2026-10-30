@@ -1,9 +1,13 @@
 # AbonStock — API Demonstration Evidence & Operational Runbook
 
 > **Document Status:** Verified Lifecycle & Operational Evidence Runbook<br>
-> **Target Environment:** Development Sandbox (`abonstock_db` on PostgreSQL 16)<br>
+> **Recorded Baseline Environment:** Development Sandbox (`abonstock_db` on PostgreSQL 16)<br>
+> **Current Testing & Onboarding Target:** Dedicated Isolated Database (`abonstock_test_db`)<br>
 > **Repository:** [AbonStock](https://github.com/reyzaarys/AbonStock)<br>
 > **Baseline Commit:** `c9c001bdf21446ad2bb9da2e696aef9c823cf2eb`
+
+> [!NOTE]
+> **Historical Environment Context:** The verified baseline outputs below were recorded live against the original development sandbox database (`abonstock_db`) during Stage 7.1 baseline verification. Current repository runbooks, automated test executions, and onboarding procedures must strictly target an isolated database (`abonstock_test_db`) to avoid mutating baseline data.
 
 This document provides verified baseline evidence and step-by-step procedures for demonstrating the **AbonStock** Web API on Upwork and GitHub.
 
@@ -32,12 +36,16 @@ dotnet run --project src/AbonStock.Api --launch-profile http
 The API listens on `http://localhost:5299`.
 
 ### Automated Test Suite Execution
-Execute the automated test suite against the isolated `abonstock_test_db`:
+Execute the complete backend automated test suite from the host terminal environment:
 ```bash
-dotnet test
+dotnet test tests/AbonStock.Tests/AbonStock.Tests.csproj
 ```
 
-#### `[VERIFIED ACTUAL OUTPUT]`
+> [!NOTE]
+> **Test Suite Scope & Database Safety Guard:**
+> The backend test suite executes both in-memory unit tests (validating authentication, RBAC, domain validation, and startup rules without database dependencies) and PostgreSQL integration tests. For all integration tests, `PostgresTestFixture` actively enforces the dedicated `abonstock_test_db` target via static validation (`ValidateTestDatabase`), immediately throwing an exception and aborting execution if `abonstock_db` or an unexpected target database is encountered.
+
+#### `[VERIFIED ACTUAL OUTPUT]` (Host Environment Execution)
 ```text
 Test run for C:\Users\trans\Downloads\Upwork\tests\AbonStock.Tests\bin\Debug\net8.0\AbonStock.Tests.dll (.NETCoreApp,Version=v8.0)
 VSTest version 17.11.1 (x64)
@@ -47,9 +55,9 @@ A total of 1 test files matched the specified pattern.
 
 Passed!  - Failed:     0, Passed:   252, Skipped:     0, Total:   252, Duration: 4 s - AbonStock.Tests.dll (net8.0)
 ```
-- **Backend Automated Tests:** 252/252 passed (0 failed).
-- **Frontend Automated Tests:** 68/68 passed (0 failed).
-- **Total Pass Rate:** 320/320 passed (100% full-stack pass rate).
+- **Backend Automated Tests:** 252/252 passed (0 failed) via xUnit across unit (140 tests) and PostgreSQL integration (112 tests) suites.
+- **Frontend Automated Tests:** 68/68 passed (0 failed) via native Node.js test runner (`npm test`).
+- **Total Pass Rate:** 320/320 passed (100% full-stack pass rate across entire solution).
 
 ---
 
@@ -209,17 +217,19 @@ Content-Type: application/json
 ### Execution Details & Concurrency Control
 1. **Pessimistic Order Lock:**
    Acquires row lock: `SELECT "Id" FROM "Orders" WHERE "Id" = 3 FOR UPDATE`.
-2. **FIFO Batch Allocation:**
-   Queries eligible released batches for Product 1 and Product 3 ordered by production date:
+2. **Deterministic Primary-Key Batch Locking:**
+   Queries eligible released batches for Product 1 and Product 3 acquiring row locks in canonical primary key order (`ORDER BY "Id" ASC`):
    ```sql
    SELECT *, "xmin" FROM "InventoryBatches"
    WHERE "ProductId" = @pProductId
      AND "Status" = 2 -- Released
      AND "PhysicalQuantity" > "ReservedQuantity"
-     AND ("ExpiryDate" IS NULL OR "ExpiryDate" >= @pToday)
-   ORDER BY "ProductionDate" ASC, "Id" ASC
+     AND "ExpiryDate" IS NOT NULL
+     AND "ExpiryDate" >= @pToday
+   ORDER BY "Id" ASC
    FOR UPDATE;
    ```
+   *Note: Database row locks are acquired strictly in primary key order (`ORDER BY "Id" ASC`) for canonical lock ordering; logical FEFO allocation ordering (`ExpiryDate ASC, ProductionDate ASC, Id ASC`) is applied separately in memory through `FefoAllocationHelper.SelectAndOrderEligibleBatches`.*
 3. **Atomic State & Reservation Persistence:**
    In an explicit database transaction:
    - Increments `ReservedQuantity` on Batch 2 (`BAT-202610-SO02`) and Batch 5 (`BAT-202610-AG01`).
@@ -459,8 +469,8 @@ Content-Type: application/json
 ### Execution Details & Concurrency Control
 1. **Pessimistic Canonical Lock Sequence:**
    - Tier 1: `Orders` row 3 `FOR UPDATE`.
-   - Tier 2: `InventoryBatches` (Batches 2 & 5) `ORDER BY ProductionDate ASC, Id ASC FOR UPDATE`.
-   - Tier 3: `Products` (Products 1 & 3) `ORDER BY Id ASC FOR UPDATE`.
+   - Tier 2: `InventoryBatches` (Batches 2 & 5) `WHERE "Id" = ANY(...) ORDER BY "Id" ASC FOR UPDATE` (locked in primary key order; FEFO allocation and movement sequence applied separately in memory).
+   - Tier 3: `Products` (Products 1 & 3) `WHERE "Id" = ANY(...) ORDER BY "Id" ASC FOR UPDATE`.
 2. **Validation:** Confirms status is `Confirmed`, active reservations match ordered items, and batches are released and unexpired.
 3. **Atomic Execution:** In a single database transaction, decrements physical and reserved batch quantities, reduces product `QuantityOnHand`, marks reservations `Fulfilled (3)`, inserts two `StockMovements` ledger records, and transitions order status to `Completed (3)`.
 

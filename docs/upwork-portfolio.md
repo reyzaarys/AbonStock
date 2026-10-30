@@ -7,14 +7,14 @@
 
 ## 1. Executive Summary
 
-**AbonStock** is a production-grade full-stack inventory management and order fulfillment system built with **ASP.NET Core 8**, **Entity Framework Core 8**, **PostgreSQL 16**, and **React 18 + TypeScript + Vite**.
+**AbonStock** is an architectural reference implementation and full-stack portfolio platform demonstrating inventory tracking and order fulfillment with **ASP.NET Core 8**, **Entity Framework Core 8**, **PostgreSQL 16**, and **React 18 + TypeScript + Vite**.
 
 It addresses the operational challenges of artisanal food manufacturing (specifically Indonesian shredded meat / *Abon* production), where physical batch perishability, quality assurance gates, strict FEFO allocation, and concurrent order races demand absolute transactional consistency.
 
 The system features:
-- Canonical row-level locking (`SELECT ... FOR UPDATE`) in PostgreSQL to eliminate deadlocks.
+- Canonical row-level locking (`SELECT ... FOR UPDATE`) in PostgreSQL to mitigate circular-wait deadlocks.
 - Optimistic concurrency control using PostgreSQL's native `xmin` system column.
-- Database-enforced double-deduction prevention via partial unique indexes.
+- Database-enforced duplicate-deduction prevention via partial unique indexes on order-batch deductions.
 - Enterprise JWT Bearer authentication with role-based access control (Admin and Staff).
 - A modern, responsive React 18 SPA with session restoration, protected routing, and role-aware UI.
 - Comprehensive automated testing: 320 automated tests verified passed across backend (252) and frontend (68).
@@ -62,13 +62,15 @@ AbonStock is architected with a decoupled frontend and backend adhering to clean
 
 ## 4. Key Backend Engineering Decisions
 
-### 1. Zero-Deadlock Canonical Lock Ordering
-Generic ORM updates under concurrent multi-line orders easily cause deadlocks. To eliminate circular waits, `OrderService` acquires row-level locks using PostgreSQL's `SELECT ... FOR UPDATE` in a strictly defined canonical order:
+### 1. Deadlock-Resistant Canonical Lock Ordering
+Generic ORM updates under concurrent multi-line orders easily cause deadlocks. To mitigate circular-wait deadlock conditions across concurrent fulfillment transactions, `OrderService` acquires row-level locks using PostgreSQL's `SELECT ... FOR UPDATE` in a strictly defined canonical order:
 1. Lock Order record: `SELECT "Id" FROM "Orders" WHERE "Id" = {id} FOR UPDATE`
-2. Lock candidate Batches: `SELECT ... FROM "InventoryBatches" ... ORDER BY "ProductionDate" ASC, "Id" ASC FOR UPDATE`
-3. Lock associated Products: `SELECT ... FROM "Products" ... ORDER BY "Id" ASC FOR UPDATE`
+2. Lock candidate Batches: `SELECT ... FROM "InventoryBatches" ... ORDER BY "Id" ASC FOR UPDATE`
+3. Lock associated Products: `SELECT ... FROM "Products" ... WHERE "Id" = ANY({productIds}) ORDER BY "Id" ASC FOR UPDATE`
 
-This guarantees that all concurrent transactions acquire database resources in the exact same sequence.
+Database row locks are acquired strictly in deterministic primary-key order (`ORDER BY "Id" ASC`), separating database locking mechanics from business allocation logic. Once row locks are secured, FEFO allocation ordering is applied separately in memory through `FefoAllocationHelper.SelectAndOrderEligibleBatches` (`ExpiryDate ASC, ProductionDate ASC, Id ASC`).
+
+`OrderService` uses a consistent resource-locking hierarchy and deterministic primary-key ordering for batch and product locks to mitigate circular-wait deadlock risk across its coordinated transaction paths.
 
 ### 2. High-Performance Optimistic Concurrency via PostgreSQL `xmin`
 Rather than adding extra timestamp columns, application triggers, or custom stored procedures, the schema maps an unsigned integer property (`uint Version`) directly to PostgreSQL’s native 32-bit `xmin` system column via EF Core's `IsRowVersion()`:
@@ -158,16 +160,28 @@ The solution maintains extensive automated test suites across both backend and f
 
 | Suite | Runner / Framework | Tests | Status | Scope |
 | :--- | :--- | :---: | :---: | :--- |
-| **Backend Automated Tests** | xUnit 2.5.3 + .NET 8 (Unit & Integration) | **252** | **252 Passed (100%)** | Domain invariants, FEFO allocation sequences, row-level concurrency, reservation lifecycle, RBAC enforcement, EF Core PostgreSQL schema migrations |
+| **Backend Automated Tests** | xUnit 2.5.3 + .NET 8 (Unit & Integration) | **252** | **252 Passed (100%)** | 140 in-memory unit tests (FEFO, domain invariants, RBAC) & 112 PostgreSQL integration tests (concurrency, reservations, double-deduction prevention) |
 | **Frontend Unit & Domain Tests** | Node.js Test Runner (`--experimental-strip-types`) | **68** | **68 Passed (100%)** | API client error handling, Bearer injection, session restoration, role-aware rendering, order itemization & ledger navigation, inventory audit & quarantine services |
 | **Total Full-Stack Verification** | **xUnit + Node.js Runner** | **320** | **320 Passed (100%)** | **Zero test failures across entire full-stack solution** |
+
+### Verification Boundaries
+- **Automated Regression:** 320 automated tests (252 backend xUnit tests: 140 unit + 112 PostgreSQL integration; 68 frontend Node.js unit and domain tests) pass with zero failures.
+- **Runtime Smoke Verification:** Host runtime verification confirmed API startup, Swagger UI availability (`/swagger`), JWT authentication issuance (`POST /api/auth/login`), and claims enforcement (`GET /api/auth/me`).
+- **Browser Verification Scope:** Interactive browser workflows (order fulfillment, quarantine, ledger navigation) were verified via manual developer walkthroughs on the host environment; automated headless browser E2E test suites (e.g. Playwright/Cypress) are not part of the repository CI suite.
+
+### Documented Architectural Limitations
+To maintain technical credibility with senior interviewers and enterprise clients:
+- **Authentication Scope:** Uses single-lifetime JWT tokens (8 hours) in browser `sessionStorage` without refresh token rotation. Demo accounts authenticate against in-memory salted PBKDF2 hashes (`Auth:Users`) rather than an external ASP.NET Core Identity database.
+- **Facility Scope:** Designed for single-facility operations (`LOC_KDR_PROD`); multi-warehouse routing is out of scope for this milestone.
+- **Date Handling:** Expiration policies evaluate UTC dates directly without local Indonesian (WIB) timezone conversion.
+- **Browser Automation:** Interactive workflows were verified manually on host browsers; automated headless browser E2E suites (Playwright/Cypress) are not included in CI.
 
 ---
 
 ## 9. Core Technical Competencies Demonstrated
 
 - **ASP.NET Core 8 & C# 12:** Minimal API design, RFC 7807 global exception handling, dependency injection, and clean architecture.
-- **PostgreSQL & Concurrency Engineering:** Row-level locking (`FOR UPDATE`), dead-lock prevention, advisory locks, partial unique constraints, and system column `xmin` optimistic concurrency tokens.
+- **PostgreSQL & Concurrency Engineering:** Row-level locking (`FOR UPDATE`), deadlock mitigation via canonical ordering, advisory locks, partial unique constraints, and system column `xmin` optimistic concurrency tokens.
 - **Inventory Domain Integrity:** Strict FEFO allocation, batch quarantine/write-off auditing, real-time invariant reconciliation, and immutable ledger movements.
 - **Enterprise Security:** JWT Bearer authentication, PBKDF2 password hashing, fallback authorization policies, and role-based access control.
 - **Frontend Development:** React 18, TypeScript (strict mode), Vite bundler, React Router v6, custom state hooks, and resilient HTTP client wrappers.
@@ -179,7 +193,7 @@ The solution maintains extensive automated test suites across both backend and f
 
 ### Project Title & Overview (For Upwork Portfolio Item)
 > **Title:** Full-Stack Inventory & Order Fulfillment Platform (.NET 8 & React 18)
-> **Summary:** Engineered a concurrent-safe inventory tracking and order fulfillment system for artisanal food manufacturing using ASP.NET Core 8, EF Core 8, PostgreSQL 16, and React 18 + TypeScript. Designed deterministic FEFO batch allocation, zero-deadlock row locking (`SELECT ... FOR UPDATE`), optimistic concurrency with native PostgreSQL `xmin` tokens, and partial unique indexes to guarantee zero duplicate deductions. Features real-time invariant audits, batch quarantine/write-off workflows, JWT Bearer authentication, and Admin/Staff role-based access control. Fully verified across 320 automated tests.
+> **Summary:** Engineered a concurrent-safe inventory tracking and order fulfillment system for artisanal food manufacturing using ASP.NET Core 8, EF Core 8, PostgreSQL 16, and React 18 + TypeScript. Designed deterministic FEFO batch allocation, deadlock-resistant canonical row locking (`SELECT ... FOR UPDATE`), optimistic concurrency with native PostgreSQL `xmin` tokens, and a partial unique index on order deductions to prevent duplicate batch decrements. Features real-time invariant audits, batch quarantine/write-off workflows, JWT Bearer authentication, and Admin/Staff role-based access control. Fully verified across 320 automated tests.
 
 ### Proposal Pitch Snippet (Applying for Senior .NET / Full-Stack Roles)
-> *"I specialize in designing resilient backend architectures and full-stack systems in .NET 8 where transaction integrity and concurrency cannot be compromised. In my recent reference project, **AbonStock**, I engineered a multi-batch inventory fulfillment system with PostgreSQL row-level locking, strict FEFO allocation, and database partial unique indexes that physically prevent duplicate stock deductions. The platform includes real-time invariant auditing, batch quarantine/write-off workflows, JWT authentication, Admin/Staff role-based authorization, and a modern React 18 TypeScript frontend. The entire codebase is verified by 320 automated tests (252 backend, 68 frontend). I would love to bring this level of architectural rigor and code quality to your project."*
+> *"I specialize in designing resilient backend architectures and full-stack systems in .NET 8 where transaction integrity and concurrency are critical design priorities. In my recent reference project, **AbonStock**, I engineered a multi-batch inventory fulfillment system with deadlock-resistant PostgreSQL row locking, strict FEFO allocation, and database partial unique indexes that prevent duplicate stock deductions against the same batch. The platform includes real-time invariant auditing, batch quarantine/write-off workflows, JWT authentication, Admin/Staff role-based authorization, and a modern React 18 TypeScript frontend. The entire codebase is verified by 320 automated tests (252 backend, 68 frontend). I would love to bring this level of architectural rigor and code quality to your project."*
